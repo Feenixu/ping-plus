@@ -1,6 +1,7 @@
-# Runtime data — not source
+# Runtime data & user-local settings — not source
 logs/
 reports/
+config.psd1
 *.jsonl
 *.html
 
