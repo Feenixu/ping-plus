@@ -64,8 +64,10 @@ $startTag
 Import-Module '$modulePath' -Force
 Set-Alias -Name pingplus  -Value Invoke-PingPlus -Scope Global
 Set-Alias -Name 'ping+'   -Value Invoke-PingPlus -Scope Global
-Set-Alias -Name pingreport -Value Show-PingReport -Scope Global
-Set-Alias -Name pingstats  -Value Get-PingStats   -Scope Global
+Set-Alias -Name pingreport -Value Show-PingReport     -Scope Global
+Set-Alias -Name pingstats  -Value Get-PingStats       -Scope Global
+Set-Alias -Name pingconfig -Value Edit-PingPlusConfig -Scope Global
+Set-Alias -Name pingclean  -Value Invoke-PingRetention -Scope Global
 $shadowLine
 $endTag
 "@
@@ -83,5 +85,16 @@ Write-Host "  pingplus <host>      enhanced ping (always available)"
 Write-Host "  ping+ <host>         same thing"
 Write-Host "  pingreport           build + open the HTML report"
 Write-Host "  pingstats            quick loss/latency table in the terminal"
+Write-Host "  pingconfig           open the config file (retention settings)"
+Write-Host "  pingclean            apply log retention now"
 Write-Host ""
+
+# Materialize the config file now so it's ready to edit immediately.
+try {
+    Import-Module $modulePath -Force
+    $null = Get-PingPlusConfig
+    Write-Host "Config file: $((Get-PingPlusPaths).ConfigFile)" -ForegroundColor Cyan
+    Write-Host ""
+} catch { }
+
 Write-Host "Load it now without reopening:  . `$PROFILE" -ForegroundColor Yellow

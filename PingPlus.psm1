@@ -23,7 +23,156 @@ function Get-PingPlusPaths {
         Root      = $root
         LogDir    = $logDir
         ReportDir = $repDir
-        LogFile   = Join-Path $logDir 'ping-log.jsonl'
+        LogFile    = Join-Path $logDir 'ping-log.jsonl'
+        ConfigFile = Join-Path $root 'config.psd1'
+    }
+}
+
+# ----------------------------------------------------------------------------
+#  Configuration + log retention
+# ----------------------------------------------------------------------------
+
+# Written verbatim to config.psd1 the first time config is needed. The comments
+# make it self-documenting so the user can just open and tweak it.
+$script:PingPlusConfigTemplate = @'
+@{
+    # =====================================================================
+    #  ping+ configuration   —  edit, save, then use `ping` as normal.
+    #  (Open quickly with:  pingconfig )
+    # =====================================================================
+
+    # Which log-retention strategy to apply to logs\ping-log.jsonl:
+    #   'runs'   = keep only the last <KeepRuns> ping runs
+    #   'days'   = keep only records from the last <KeepDays> days
+    #   'both'   = keep a record only if it passes BOTH limits (bounds size AND age)
+    #   'either' = keep a record if it passes EITHER limit (most lenient)
+    #   'none'   = never delete anything
+    RetentionMode = 'both'
+
+    # Keep only the last N ping runs. One "run" = one `ping ...` command you ran.
+    # Applies when RetentionMode is 'runs', 'both', or 'either'. 0 = no run limit.
+    KeepRuns = 50
+
+    # Delete records older than this many days.
+    # Applies when RetentionMode is 'days', 'both', or 'either'. 0 = no age limit.
+    KeepDays = 30
+
+    # When to run cleanup automatically: 'start', 'finish', or 'both'.
+    ApplyOn = 'finish'
+}
+'@
+
+function Get-PingPlusConfigDefaults {
+    @{
+        RetentionMode = 'both'
+        KeepRuns      = 50
+        KeepDays      = 30
+        ApplyOn       = 'finish'
+    }
+}
+
+# Load (creating on first use) the effective config, validated + normalized.
+function Get-PingPlusConfig {
+    [CmdletBinding()]
+    param()
+    $cfgFile = (Get-PingPlusPaths).ConfigFile
+    if (-not (Test-Path $cfgFile)) {
+        try { Set-Content -Path $cfgFile -Value $script:PingPlusConfigTemplate -Encoding utf8 } catch { }
+    }
+    $cfg = Get-PingPlusConfigDefaults
+    if (Test-Path $cfgFile) {
+        try {
+            $loaded = Import-PowerShellDataFile -Path $cfgFile
+            foreach ($k in $loaded.Keys) { $cfg[$k] = $loaded[$k] }
+        }
+        catch {
+            Write-Warning "ping+: could not parse $cfgFile ($($_.Exception.Message)). Using defaults."
+        }
+    }
+    # Validate / normalize so bad values can never wipe data unexpectedly.
+    $mode = "$($cfg.RetentionMode)".ToLower()
+    $cfg.RetentionMode = if ($mode -in 'runs', 'days', 'both', 'either', 'none') { $mode } else { 'both' }
+    $apply = "$($cfg.ApplyOn)".ToLower()
+    $cfg.ApplyOn = if ($apply -in 'start', 'finish', 'both') { $apply } else { 'finish' }
+    $cfg.KeepRuns = [math]::Max(0, [int]$cfg.KeepRuns)
+    $cfg.KeepDays = [math]::Max(0.0, [double]$cfg.KeepDays)
+    [pscustomobject]$cfg
+}
+
+# Open config.psd1 in an editor ($EDITOR, else VS Code, else Notepad).
+function Edit-PingPlusConfig {
+    [CmdletBinding()]
+    param()
+    $null = Get-PingPlusConfig                      # materialize if missing
+    $cfgFile = (Get-PingPlusPaths).ConfigFile
+    if ($env:EDITOR) { & $env:EDITOR $cfgFile; return }
+    $code = Get-Command code -ErrorAction SilentlyContinue
+    if ($code) { & $code.Source $cfgFile; return }
+    notepad $cfgFile
+}
+
+# Apply the configured retention policy to the log (safe to call anytime).
+function Invoke-PingRetention {
+    [CmdletBinding()]
+    param([object] $Config)
+
+    $logFile = (Get-PingPlusPaths).LogFile
+    if (-not (Test-Path $logFile)) { return }
+    if (-not $Config) { $Config = Get-PingPlusConfig }
+    if ($Config.RetentionMode -eq 'none') { return }
+
+    $lines = Get-Content -Path $logFile -Encoding utf8 | Where-Object { $_.Trim() }
+    if (-not $lines) { return }
+
+    # Parse just what retention needs: the raw line, its run id, its timestamp.
+    $items = foreach ($ln in $lines) {
+        $o = $null
+        try { $o = $ln | ConvertFrom-Json } catch { }
+        if ($null -eq $o) { continue }
+        $run = if ($o.PSObject.Properties.Name -contains 'run' -and $o.run) { [string]$o.run } else { 'legacy' }
+        [pscustomobject]@{ raw = $ln; run = $run; t = (ConvertTo-PingTime $o.ts) }
+    }
+    $items = @($items)
+    if ($items.Count -eq 0) { return }
+
+    $mode = $Config.RetentionMode
+
+    # Run-based limit: keep the most recent N runs (ordered by their latest ts).
+    $keepRunSet = $null
+    if ($mode -in 'runs', 'both', 'either' -and [int]$Config.KeepRuns -ge 1) {
+        $keepRuns = $items | Group-Object run |
+            ForEach-Object { [pscustomobject]@{ run = $_.Name; last = ($_.Group.t | Measure-Object -Maximum).Maximum } } |
+            Sort-Object last | Select-Object -Last ([int]$Config.KeepRuns) | ForEach-Object { $_.run }
+        $keepRunSet = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($r in $keepRuns) { [void]$keepRunSet.Add([string]$r) }
+    }
+
+    # Age-based limit: keep records newer than the cutoff.
+    $cutoff = $null
+    if ($mode -in 'days', 'both', 'either' -and [double]$Config.KeepDays -gt 0) {
+        $cutoff = (Get-Date).AddDays(-[double]$Config.KeepDays)
+    }
+
+    $kept = foreach ($it in $items) {
+        $okRuns = if ($null -ne $keepRunSet) { $keepRunSet.Contains($it.run) } else { $true }
+        $okDays = if ($null -ne $cutoff) { ($null -eq $it.t) -or ($it.t -ge $cutoff) } else { $true }
+        $keep = switch ($mode) {
+            'runs'   { $okRuns }
+            'days'   { $okDays }
+            'both'   { $okRuns -and $okDays }
+            'either' { $okRuns -or $okDays }
+            default  { $true }
+        }
+        if ($keep) { $it.raw }
+    }
+    $kept = @($kept)
+
+    # Only rewrite if something actually changed; do it atomically.
+    if ($kept.Count -ne $items.Count) {
+        $tmp = "$logFile.tmp"
+        Set-Content -Path $tmp -Value $kept -Encoding utf8
+        Move-Item -Path $tmp -Destination $logFile -Force
+        Write-Verbose "ping+ retention: kept $($kept.Count) of $($items.Count) records."
     }
 }
 
@@ -82,6 +231,15 @@ function Invoke-PingPlus {
     $state  = [pscustomobject]@{ target = $bestTarget; ip = $null }
     $logged = [System.Collections.Generic.List[string]]::new()
 
+    # Load retention config and stamp this invocation with a sortable run id so
+    # "keep last N runs" can group records. Retention failures must never break
+    # ping, hence the try/catch around it.
+    $cfg   = Get-PingPlusConfig
+    $runId = (Get-Date).ToString('yyyyMMddHHmmssfff') + '-' + ([guid]::NewGuid().ToString('N').Substring(0, 4))
+    if ($cfg.ApplyOn -eq 'start' -or $cfg.ApplyOn -eq 'both') {
+        try { Invoke-PingRetention -Config $cfg } catch { }
+    }
+
     # Stream ping line-by-line, echoing each line *verbatim* so the on-screen
     # experience is identical to stock ping (no colour, no reformatting). All
     # parsing/logging happens silently. try/finally so the report link is still
@@ -120,6 +278,7 @@ function Invoke-PingPlus {
             if ($status) {
                 $rec = [ordered]@{
                     ts         = $ts
+                    run        = $runId
                     target     = $state.target
                     ip         = $state.ip
                     status     = $status
@@ -133,6 +292,11 @@ function Invoke-PingPlus {
         }
     }
     finally {
+        # Apply log retention (per config) before building the report so the
+        # report reflects exactly what's kept on disk.
+        if ($cfg.ApplyOn -eq 'finish' -or $cfg.ApplyOn -eq 'both') {
+            try { Invoke-PingRetention -Config $cfg } catch { }
+        }
         # The one and only addition to stock ping: a single clickable link.
         if ($logged.Count -gt 0) {
             $reportPath = New-PingReportFile -Target $state.target
@@ -461,4 +625,5 @@ function Get-PingStats {
     }
 }
 
-Export-ModuleMember -Function Invoke-PingPlus, Show-PingReport, Get-PingStats, Get-PingPlusPaths
+Export-ModuleMember -Function Invoke-PingPlus, Show-PingReport, Get-PingStats, Get-PingPlusPaths,
+    Get-PingPlusConfig, Edit-PingPlusConfig, Invoke-PingRetention

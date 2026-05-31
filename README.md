@@ -90,12 +90,63 @@ pingstats -Target google.com -Last 1000
 
 ---
 
+## Configuration & log retention
+
+So the log can't grow forever, ping+ prunes old data automatically based on a
+small, self-documented config file at **`C:\ping+\config.psd1`**. It's created
+on first use; open it any time with:
+
+```powershell
+pingconfig          # opens config.psd1 in $EDITOR / VS Code / Notepad
+```
+
+Default contents:
+
+```powershell
+@{
+    RetentionMode = 'both'   # 'runs' | 'days' | 'both' | 'either' | 'none'
+    KeepRuns      = 50       # keep only the last N ping runs
+    KeepDays      = 30       # delete records older than N days
+    ApplyOn       = 'finish' # 'start' | 'finish' | 'both'
+}
+```
+
+| Option | Meaning |
+|---|---|
+| `RetentionMode` | Which strategy to apply (see below). |
+| `KeepRuns` | Keep only the last **N runs**. One "run" = one `ping …` command you ran. `0` = no run limit. |
+| `KeepDays` | Delete records older than **N days**. `0` = no age limit. |
+| `ApplyOn` | When cleanup runs automatically: when a ping `start`s, when it `finish`es, or `both`. |
+
+**RetentionMode values**
+
+- `runs` — keep only the last `KeepRuns` runs, delete older runs.
+- `days` — keep only records from the last `KeepDays` days.
+- `both` — keep a record only if it passes **both** limits (bounds size *and* age). *(default)*
+- `either` — keep a record if it passes **either** limit (most lenient).
+- `none` — never delete anything.
+
+Cleanup happens silently in the background. You can also trigger it on demand:
+
+```powershell
+pingclean                 # apply the current policy right now
+pingclean -Verbose        # ...and report how many records were kept
+Get-PingPlusConfig        # show the effective (validated) settings
+```
+
+Bad or missing values fall back to the defaults, so a typo in the config can
+never accidentally wipe your history. Each log record is tagged with a `run` id,
+which is what makes "keep last N runs" possible.
+
+---
+
 ## Where things live
 
 ```
 C:\ping+\
   PingPlus.psm1            the wrapper + report engine
   Install.ps1              profile wiring (install / -NoShadow / -Uninstall)
+  config.psd1              retention settings (edit with `pingconfig`)
   README.md                this file
   logs\ping-log.jsonl      append-only history (one JSON object per event)
   reports\report.html      latest report (+ timestamped copies)
@@ -106,9 +157,12 @@ C:\ping+\
 One JSON object per line, e.g.:
 
 ```json
-{"ts":"2026-05-31T14:03:01.1234567-07:00","target":"google.com","ip":"142.250.80.46","status":"ok","latency_ms":14,"sub_ms":false,"raw":"Reply from 142.250.80.46: bytes=32 time=14ms TTL=117"}
-{"ts":"2026-05-31T14:03:02.2345678-07:00","target":"google.com","ip":null,"status":"timeout","latency_ms":null,"sub_ms":false,"raw":"Request timed out."}
+{"ts":"2026-05-31T14:03:01.1234567-07:00","run":"20260531140301123-9af2","target":"google.com","ip":"142.250.80.46","status":"ok","latency_ms":14,"sub_ms":false,"raw":"Reply from 142.250.80.46: bytes=32 time=14ms TTL=117"}
+{"ts":"2026-05-31T14:03:02.2345678-07:00","run":"20260531140301123-9af2","target":"google.com","ip":null,"status":"timeout","latency_ms":null,"sub_ms":false,"raw":"Request timed out."}
 ```
+
+`run` groups records from the same `ping` invocation (used by the
+"keep last N runs" retention policy).
 
 `status` is one of `ok`, `timeout`, `unreachable`, `dns_error`, `error`.
 Because it's plain JSONL you can also analyze it with anything (Excel via
