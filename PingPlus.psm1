@@ -333,7 +333,7 @@ function Show-PingReport {
         $lP50 = if ($lat) { [math]::Round((Get-PingPercentile $lat 50), 1) } else { '-' }
         $lP95 = if ($lat) { [math]::Round((Get-PingPercentile $lat 95), 1) } else { '-' }
 
-        $outages = Get-PingOutages $recs
+        $outages = @(Get-PingOutages $recs)
         $tFirst  = ConvertTo-PingTime ($recs | Sort-Object { ConvertTo-PingTime $_.ts } | Select-Object -First 1).ts
         $tLast   = ConvertTo-PingTime ($recs | Sort-Object { ConvertTo-PingTime $_.ts } | Select-Object -Last 1).ts
 
@@ -349,7 +349,8 @@ function Show-PingReport {
         [void]$sb.Append("<div class='card'><div class='v'>$lAvg</div><div class='k'>Avg ms</div></div>")
         [void]$sb.Append("<div class='card'><div class='v'>$lMin/$lMax</div><div class='k'>Min/Max ms</div></div>")
         [void]$sb.Append("<div class='card'><div class='v'>$lP50/$lP95</div><div class='k'>p50/p95 ms</div></div>")
-        [void]$sb.Append("<div class='card $((if($outages.Count){'bad'}else{'good'}))'><div class='v'>$($outages.Count)</div><div class='k'>Outages</div></div>")
+        $outClass = if ($outages.Count) { 'bad' } else { 'good' }
+        [void]$sb.Append("<div class='card $outClass'><div class='v'>$($outages.Count)</div><div class='k'>Outages</div></div>")
         [void]$sb.Append("</div>")
 
         [void]$sb.Append((New-PingLatencySvg $recs))
