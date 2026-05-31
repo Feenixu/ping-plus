@@ -50,9 +50,18 @@ ping -n 100 1.1.1.1        # 100 pings
 pingplus github.com        # if you didn't shadow `ping`
 ```
 
-Drops are printed in **red** so a live run is easy to read.
+The on-screen output is **identical to stock ping** — same live reply lines,
+same final sent/received/lost summary, nothing reformatted. All the logging and
+analysis happens silently in the background. The only addition is **one extra
+line at the very end: a clickable link to the report** for that run. In Windows
+Terminal / VS Code it shows as a tidy "View ping+ report" hyperlink (OSC 8); in
+other terminals it prints the plain `file://` URL, which stays Ctrl+click-able.
 
 ### See the report
+
+Every run already prints a link, but you can also open it on demand:
+
+
 
 ```powershell
 pingreport                 # builds + opens C:\ping+\reports\report.html

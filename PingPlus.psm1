@@ -28,6 +28,25 @@ function Get-PingPlusPaths {
 }
 
 # ----------------------------------------------------------------------------
+#  Write-PingReportLink  —  print ONE clickable line pointing at the report.
+#  Uses an OSC 8 terminal hyperlink on terminals that support it (Windows
+#  Terminal, modern VS Code, ConEmu); elsewhere it prints the bare file:// URL,
+#  which those terminals still make Ctrl+click-able. Never any escape noise.
+# ----------------------------------------------------------------------------
+function Write-PingReportLink {
+    param([Parameter(Mandatory)][string] $Path)
+    $uri = ([System.Uri] (Resolve-Path $Path).Path).AbsoluteUri  # file:///C:/ping+/reports/report.html
+    $supportsOsc8 = $env:WT_SESSION -or ($env:TERM_PROGRAM -eq 'vscode') -or ($env:ConEmuANSI -eq 'ON')
+    if ($supportsOsc8) {
+        $esc = [char]27
+        Write-Host ("$esc]8;;$uri$esc\View ping+ report$esc]8;;$esc\")
+    }
+    else {
+        Write-Host $uri
+    }
+}
+
+# ----------------------------------------------------------------------------
 #  Invoke-PingPlus  —  the wrapper. Call it directly, or via the `ping` /
 #  `ping+` / `pingplus` aliases (see PingPlus.psm1 export + Install.ps1).
 # ----------------------------------------------------------------------------
@@ -55,57 +74,69 @@ function Invoke-PingPlus {
         return
     }
 
-    # Best-effort target = last token that isn't a -flag / /flag.
-    $target = ($PingArgs | Where-Object { $_ -notmatch '^[-/]' } | Select-Object -Last 1)
-    if (-not $target) { $target = 'unknown' }
-    $ip = $null
+    # Best-effort target = last token that isn't a -flag / /flag. Held on an
+    # object so the parsed value survives the ForEach-Object scope boundary and
+    # is readable in the finally block below.
+    $bestTarget = ($PingArgs | Where-Object { $_ -notmatch '^[-/]' } | Select-Object -Last 1)
+    if (-not $bestTarget) { $bestTarget = 'unknown' }
+    $state  = [pscustomobject]@{ target = $bestTarget; ip = $null }
+    $logged = [System.Collections.Generic.List[string]]::new()
 
-    # Stream ping line-by-line. Because we append per line, Ctrl+C on a
-    # continuous (`-t`) ping still leaves a complete log.
-    & $pingExe @PingArgs 2>&1 | ForEach-Object {
-        $line   = [string]$_
-        $ts     = (Get-Date).ToString('o')   # ISO-8601 round-trip
-        $status = $null
-        $lat    = $null
-        $subms  = $false
+    # Stream ping line-by-line, echoing each line *verbatim* so the on-screen
+    # experience is identical to stock ping (no colour, no reformatting). All
+    # parsing/logging happens silently. try/finally so the report link is still
+    # printed if a continuous (`-t`) run is stopped with Ctrl+C. Because we
+    # append per line, Ctrl+C never loses logged data.
+    try {
+        & $pingExe @PingArgs 2>&1 | ForEach-Object {
+            $line = [string]$_
 
-        if ($line -match 'Pinging\s+(?<host>\S+)\s+\[(?<ip>[^\]]+)\]') {
-            $target = $Matches['host']; $ip = $Matches['ip']
-        }
-        elseif ($line -match 'Pinging\s+(?<host>\S+)\s+with') {
-            $target = $Matches['host']; if (-not $ip) { $ip = $Matches['host'] }
-        }
-        elseif ($line -match 'Request timed out')                       { $status = 'timeout' }
-        elseif ($line -match 'Destination (host|net) unreachable')      { $status = 'unreachable' }
-        elseif ($line -match 'could not find host|could not find')      { $status = 'dns_error' }
-        elseif ($line -match 'General failure|transmit failed|TTL expired') { $status = 'error' }
-        elseif ($line -match 'Reply from (?<rip>[^:]+):.*time(?<op>[=<])(?<t>\d+)\s*ms') {
-            $status = 'ok'
-            $lat    = [int]$Matches['t']
-            if ($Matches['op'] -eq '<') { $subms = $true }
-            if (-not $ip) { $ip = ($Matches['rip']).Trim() }
-        }
-
-        # Echo to console, colouring drops red so live runs are readable.
-        if ($status -in 'timeout', 'unreachable', 'dns_error', 'error') {
-            Write-Host $line -ForegroundColor Red
-        }
-        else {
+            # 1) Show the line exactly as ping produced it.
             Write-Host $line
-        }
 
-        # Only persist meaningful events (replies / drops), not banner/blank lines.
-        if ($status) {
-            $rec = [ordered]@{
-                ts         = $ts
-                target     = $target
-                ip         = $ip
-                status     = $status
-                latency_ms = $lat
-                sub_ms     = $subms
-                raw        = $line.Trim()
+            # 2) Parse + log it silently.
+            $ts     = (Get-Date).ToString('o')   # ISO-8601 round-trip
+            $status = $null
+            $lat    = $null
+            $subms  = $false
+
+            if ($line -match 'Pinging\s+(?<host>\S+)\s+\[(?<ip>[^\]]+)\]') {
+                $state.target = $Matches['host']; $state.ip = $Matches['ip']
             }
-            ($rec | ConvertTo-Json -Compress) | Add-Content -Path $logFile -Encoding utf8
+            elseif ($line -match 'Pinging\s+(?<host>\S+)\s+with') {
+                $state.target = $Matches['host']; if (-not $state.ip) { $state.ip = $Matches['host'] }
+            }
+            elseif ($line -match 'Request timed out')                       { $status = 'timeout' }
+            elseif ($line -match 'Destination (host|net) unreachable')      { $status = 'unreachable' }
+            elseif ($line -match 'could not find host|could not find')      { $status = 'dns_error' }
+            elseif ($line -match 'General failure|transmit failed|TTL expired') { $status = 'error' }
+            elseif ($line -match 'Reply from (?<rip>[^:]+):.*time(?<op>[=<])(?<t>\d+)\s*ms') {
+                $status = 'ok'
+                $lat    = [int]$Matches['t']
+                if ($Matches['op'] -eq '<') { $subms = $true }
+                if (-not $state.ip) { $state.ip = ($Matches['rip']).Trim() }
+            }
+
+            if ($status) {
+                $rec = [ordered]@{
+                    ts         = $ts
+                    target     = $state.target
+                    ip         = $state.ip
+                    status     = $status
+                    latency_ms = $lat
+                    sub_ms     = $subms
+                    raw        = $line.Trim()
+                }
+                ($rec | ConvertTo-Json -Compress) | Add-Content -Path $logFile -Encoding utf8
+                $logged.Add($status)   # mutating the List crosses the scope boundary
+            }
+        }
+    }
+    finally {
+        # The one and only addition to stock ping: a single clickable link.
+        if ($logged.Count -gt 0) {
+            $reportPath = New-PingReportFile -Target $state.target
+            if ($reportPath) { Write-PingReportLink -Path $reportPath }
         }
     }
 }
@@ -262,21 +293,19 @@ function Get-PingOutages {
 }
 
 # ----------------------------------------------------------------------------
-#  Show-PingReport  —  render + open the HTML report.
+#  New-PingReportFile  —  build the HTML report silently and return its path
+#  (or $null when there's nothing to report). No console output, no browser.
+#  This is what the live `ping` wrapper calls to refresh the report.
 # ----------------------------------------------------------------------------
-function Show-PingReport {
+function New-PingReportFile {
     [CmdletBinding()]
     param(
         [string] $Target,          # filter to one host
-        [int]    $Last = 0,        # 0 = all records
-        [switch] $NoOpen           # don't auto-open the browser
+        [int]    $Last = 0         # 0 = all records
     )
 
     $paths = Get-PingPlusPaths
-    if (-not (Test-Path $paths.LogFile)) {
-        Write-Warning "No log yet at $($paths.LogFile). Run some pings first (e.g. 'ping google.com')."
-        return
-    }
+    if (-not (Test-Path $paths.LogFile)) { return $null }
     if (-not (Test-Path $paths.ReportDir)) {
         New-Item -ItemType Directory -Path $paths.ReportDir -Force | Out-Null
     }
@@ -288,7 +317,7 @@ function Show-PingReport {
 
     if ($Target) { $records = $records | Where-Object { $_.target -eq $Target } }
     if ($Last -gt 0) { $records = $records | Select-Object -Last $Last }
-    if (-not $records) { Write-Warning 'No matching records.'; return }
+    if (-not $records) { return $null }
 
     $generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     $groups = $records | Group-Object target
@@ -381,6 +410,25 @@ function Show-PingReport {
     # also keep a timestamped copy for history
     $sb.ToString() | Set-Content -Path (Join-Path $paths.ReportDir "report-$stamp.html") -Encoding utf8
 
+    return $outFile
+}
+
+# ----------------------------------------------------------------------------
+#  Show-PingReport  —  interactive command: build the report, print where it
+#  went, and open it in the browser (unless -NoOpen).
+# ----------------------------------------------------------------------------
+function Show-PingReport {
+    [CmdletBinding()]
+    param(
+        [string] $Target,          # filter to one host
+        [int]    $Last = 0,        # 0 = all records
+        [switch] $NoOpen           # don't auto-open the browser
+    )
+    $outFile = New-PingReportFile -Target $Target -Last $Last
+    if (-not $outFile) {
+        Write-Warning "No matching ping data yet. Run some pings first (e.g. 'ping google.com')."
+        return
+    }
     Write-Host "Report written to $outFile" -ForegroundColor Green
     if (-not $NoOpen) { Start-Process $outFile }
 }
