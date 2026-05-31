@@ -1,0 +1,10 @@
+# Runtime data — not source
+logs/
+reports/
+*.jsonl
+*.html
+
+# Editor / OS cruft
+*.swp
+Thumbs.db
+desktop.ini
