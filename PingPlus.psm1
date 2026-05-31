@@ -417,9 +417,9 @@ function New-PingLatencySvg {
 # Build an inline SVG availability strip (green=ok, red=drop) in time order.
 function New-PingStripSvg {
     param([object[]] $records)
-    $ordered = $records | Sort-Object { ConvertTo-PingTime $_.ts }
+    $ordered = @($records | Sort-Object { ConvertTo-PingTime $_.ts })
     $n = $ordered.Count
-    if ($n -eq 0) { return '' }
+    if ($n -lt 1) { return '' }
     $w = 900; $h = 26
     $bw = [math]::Max(($w / $n), 0.5)
     $sb = [System.Text.StringBuilder]::new()
