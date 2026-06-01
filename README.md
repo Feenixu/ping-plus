@@ -1,19 +1,35 @@
 # ping+
 
-A drop-in upgrade for the Windows `ping` command. It runs the **real** ping,
-shows you the same live output, **but also timestamps and logs every reply,
-timeout and error** to a file — then turns that history into a local HTML
-report with a latency graph, an availability strip, and explicit outage
-windows ("between *these* timestamps every ping failed").
+**Log Windows `ping` results to a file and chart packet loss & latency over
+time.** ping+ wraps the built-in Windows `ping` command so it works exactly as
+before, but silently **timestamps and logs every reply, timeout and DNS error**
+to a file — then turns that history into a local HTML report with a **latency
+graph**, an **availability strip**, and explicit **outage windows** ("between
+*these* timestamps every ping failed").
+
+It answers the question stock ping can't: *how often does my connection
+actually drop, when, and for how long?*
 
 Nothing replaces `C:\Windows\System32\PING.EXE`. ping+ is a thin PowerShell
 wrapper that calls the real binary by absolute path. Removing ping+ leaves your
 system exactly as it was.
 
 - **No dependencies** — pure PowerShell + inline SVG. No internet, no JS
-  libraries, no modules to install. Works on Windows PowerShell 5.1 and 7+.
+  libraries, no modules to install.
 - **Non-destructive** — never touches the real ping; install is just a profile
   edit, fully reversible.
+
+### Good for
+
+- Catching **intermittent internet drops** that stock ping forgets the moment
+  it exits.
+- Seeing **packet loss and latency trends** over minutes, hours, or days.
+- Keeping a **persistent ping history** across reboots and sessions.
+- Diagnosing flaky Wi-Fi, VPN, or DNS without leaving the terminal.
+
+### Requirements
+
+Windows · PowerShell 5.1 or 7+ · English-language ping output. No admin needed.
 
 ---
 
@@ -79,10 +95,8 @@ other terminals it prints the plain `file://` URL, which stays Ctrl+click-able.
 
 Every run already prints a link, but you can also open it on demand:
 
-
-
 ```powershell
-pingreport                 # builds + opens C:\ping+\reports\report.html
+pingreport                 # builds + opens reports\report.html, then launches it
 pingreport -Target 8.8.8.8 # just one host
 pingreport -AllHistory     # include every past session, not just the latest
 pingreport -Last 500       # only the most recent 500 records
