@@ -245,6 +245,10 @@ function Invoke-PingPlus {
     # scriptblock so the live loop and the Ctrl+C drain share one code path.
     $processLine = {
         param([string] $line)
+        # ping.exe writes the literal word "Control-C" to stdout when a
+        # continuous (-t) run is interrupted. Swallow it so the terminal shows
+        # only its own native "^C" indicator, matching the stock ping look.
+        if ($line.Trim() -eq 'Control-C') { return }
         Write-Host $line
         $ts = (Get-Date).ToString('o'); $status = $null; $lat = $null; $subms = $false
         if ($line -match 'Pinging\s+(?<host>\S+)\s+\[(?<ip>[^\]]+)\]') {
