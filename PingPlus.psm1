@@ -224,8 +224,8 @@ function Invoke-PingPlus {
     }
 
     # Best-effort target = last token that isn't a -flag / /flag. Held on an
-    # object so the parsed value survives the ForEach-Object scope boundary and
-    # is readable in the finally block below.
+    # object so the parsed value is readable from the line processor and the
+    # finally block below.
     $bestTarget = ($PingArgs | Where-Object { $_ -notmatch '^[-/]' } | Select-Object -Last 1)
     if (-not $bestTarget) { $bestTarget = 'unknown' }
     $state  = [pscustomobject]@{ target = $bestTarget; ip = $null }
@@ -240,58 +240,79 @@ function Invoke-PingPlus {
         try { Invoke-PingRetention -Config $cfg } catch { }
     }
 
-    # Stream ping line-by-line, echoing each line *verbatim* so the on-screen
-    # experience is identical to stock ping (no colour, no reformatting). All
-    # parsing/logging happens silently. try/finally so the report link is still
-    # printed if a continuous (`-t`) run is stopped with Ctrl+C. Because we
-    # append per line, Ctrl+C never loses logged data.
-    try {
-        & $pingExe @PingArgs 2>&1 | ForEach-Object {
-            $line = [string]$_
-
-            # 1) Show the line exactly as ping produced it.
-            Write-Host $line
-
-            # 2) Parse + log it silently.
-            $ts     = (Get-Date).ToString('o')   # ISO-8601 round-trip
-            $status = $null
-            $lat    = $null
-            $subms  = $false
-
-            if ($line -match 'Pinging\s+(?<host>\S+)\s+\[(?<ip>[^\]]+)\]') {
-                $state.target = $Matches['host']; $state.ip = $Matches['ip']
+    # Process one raw ping line: echo it *verbatim* (so the on-screen experience
+    # is identical to stock ping), then parse + log it silently. Defined as a
+    # scriptblock so the live loop and the Ctrl+C drain share one code path.
+    $processLine = {
+        param([string] $line)
+        Write-Host $line
+        $ts = (Get-Date).ToString('o'); $status = $null; $lat = $null; $subms = $false
+        if ($line -match 'Pinging\s+(?<host>\S+)\s+\[(?<ip>[^\]]+)\]') {
+            $state.target = $Matches['host']; $state.ip = $Matches['ip']
+        }
+        elseif ($line -match 'Pinging\s+(?<host>\S+)\s+with') {
+            $state.target = $Matches['host']; if (-not $state.ip) { $state.ip = $Matches['host'] }
+        }
+        elseif ($line -match 'Request timed out')                          { $status = 'timeout' }
+        elseif ($line -match 'Destination (host|net) unreachable')         { $status = 'unreachable' }
+        elseif ($line -match 'could not find host|could not find')         { $status = 'dns_error' }
+        elseif ($line -match 'General failure|transmit failed|TTL expired'){ $status = 'error' }
+        elseif ($line -match 'Reply from (?<rip>[^:]+):.*time(?<op>[=<])(?<t>\d+)\s*ms') {
+            $status = 'ok'
+            $lat    = [int]$Matches['t']
+            if ($Matches['op'] -eq '<') { $subms = $true }
+            if (-not $state.ip) { $state.ip = ($Matches['rip']).Trim() }
+        }
+        if ($status) {
+            $rec = [ordered]@{
+                ts = $ts; run = $runId; target = $state.target; ip = $state.ip
+                status = $status; latency_ms = $lat; sub_ms = $subms; raw = $line.Trim()
             }
-            elseif ($line -match 'Pinging\s+(?<host>\S+)\s+with') {
-                $state.target = $Matches['host']; if (-not $state.ip) { $state.ip = $Matches['host'] }
-            }
-            elseif ($line -match 'Request timed out')                       { $status = 'timeout' }
-            elseif ($line -match 'Destination (host|net) unreachable')      { $status = 'unreachable' }
-            elseif ($line -match 'could not find host|could not find')      { $status = 'dns_error' }
-            elseif ($line -match 'General failure|transmit failed|TTL expired') { $status = 'error' }
-            elseif ($line -match 'Reply from (?<rip>[^:]+):.*time(?<op>[=<])(?<t>\d+)\s*ms') {
-                $status = 'ok'
-                $lat    = [int]$Matches['t']
-                if ($Matches['op'] -eq '<') { $subms = $true }
-                if (-not $state.ip) { $state.ip = ($Matches['rip']).Trim() }
-            }
-
-            if ($status) {
-                $rec = [ordered]@{
-                    ts         = $ts
-                    run        = $runId
-                    target     = $state.target
-                    ip         = $state.ip
-                    status     = $status
-                    latency_ms = $lat
-                    sub_ms     = $subms
-                    raw        = $line.Trim()
-                }
-                ($rec | ConvertTo-Json -Compress) | Add-Content -Path $logFile -Encoding utf8
-                $logged.Add($status)   # mutating the List crosses the scope boundary
-            }
+            ($rec | ConvertTo-Json -Compress) | Add-Content -Path $logFile -Encoding utf8
+            $logged.Add($status)
         }
     }
+    $drain = { param($rdr) if ($rdr) { while ($null -ne ($l = $rdr.ReadLine())) { & $processLine $l } } }
+
+    # Run the REAL ping with stdout/stderr redirected to temp files, tail them
+    # live for verbatim display, and drain the remainder in `finally`. This is
+    # what lets us keep ping's final "Ping statistics" block when a continuous
+    # (`-t`) run is ended with Ctrl+C: the old `| ForEach-Object` pipeline was
+    # torn down by Ctrl+C *before* those last lines were read, so they vanished.
+    # Here ping (sharing the console) gets the Ctrl+C too, writes its summary to
+    # the temp file, and exits; we then read and display those lines.
+    $tmpOut = [System.IO.Path]::GetTempFileName()
+    $tmpErr = [System.IO.Path]::GetTempFileName()
+    $proc = $null; $rOut = $null; $rErr = $null
+    try {
+        $proc = Start-Process -FilePath $pingExe -ArgumentList $PingArgs -NoNewWindow -PassThru `
+                    -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+        $rOut = [System.IO.StreamReader]::new([System.IO.FileStream]::new(
+                    $tmpOut, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite))
+        $rErr = [System.IO.StreamReader]::new([System.IO.FileStream]::new(
+                    $tmpErr, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite))
+
+        while (-not $proc.HasExited) {
+            $line = $rOut.ReadLine()
+            if ($null -ne $line) { & $processLine $line }
+            else { Start-Sleep -Milliseconds 40 }
+        }
+        & $drain $rOut
+        & $drain $rErr
+    }
     finally {
+        # On Ctrl+C, ping is still flushing its statistics block — wait briefly,
+        # then drain every remaining line so the final summary shows and logs
+        # exactly like stock ping.
+        try {
+            if ($proc) { [void]$proc.WaitForExit(2000) }
+            & $drain $rOut
+            & $drain $rErr
+            if ($rOut) { $rOut.Dispose() }
+            if ($rErr) { $rErr.Dispose() }
+        } catch { }
+        Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
+
         # Apply log retention (per config) before building the report so the
         # report reflects exactly what's kept on disk.
         if ($cfg.ApplyOn -eq 'finish' -or $cfg.ApplyOn -eq 'both') {
