@@ -66,14 +66,22 @@ Every run already prints a link, but you can also open it on demand:
 ```powershell
 pingreport                 # builds + opens C:\ping+\reports\report.html
 pingreport -Target 8.8.8.8 # just one host
+pingreport -AllHistory     # include every past session, not just the latest
 pingreport -Last 500       # only the most recent 500 records
 pingreport -NoOpen         # build but don't launch the browser
 ```
 
+**Sessions:** by default the report shows only each host's **most recent
+session** (one `ping …` run). So re-pinging the same target doesn't visually
+merge separate runs into one. To see the full long-term picture across every
+session — useful for "how often does this connection drop over days?" — add
+**`-AllHistory`**; the latency graph then draws each session as its own line
+(no misleading diagonal bridging the idle gaps between runs).
+
 The report (per host) shows:
 
-- **Cards:** total pings, OK, dropped, loss %, avg / min / max / p50 / p95
-  latency, number of outages.
+- **Cards:** total pings, **elapsed time**, OK, dropped, loss %, avg / min /
+  max / p50 / p95 latency, number of outages.
 - **Latency graph:** inline SVG line chart over real time; red ticks mark drops.
 - **Availability strip:** one bar per ping, green = reply, red = drop, oldest →
   newest — instantly shows clustering of failures.

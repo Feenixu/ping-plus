@@ -380,7 +380,8 @@ function New-PingLatencySvg {
     $points = foreach ($r in $records) {
         $t = ConvertTo-PingTime $r.ts
         if ($null -eq $t) { continue }
-        [pscustomobject]@{ t = $t; ok = ($r.status -eq 'ok'); lat = $r.latency_ms }
+        $run = if ($r.PSObject.Properties.Name -contains 'run' -and $r.run) { [string]$r.run } else { 'legacy' }
+        [pscustomobject]@{ t = $t; ok = ($r.status -eq 'ok'); lat = $r.latency_ms; run = $run }
     }
     $points = $points | Sort-Object t
     if (-not $points -or $points.Count -eq 0) { return '<p class="muted">No data to plot.</p>' }
@@ -411,19 +412,31 @@ function New-PingLatencySvg {
     [void]$sb.Append("<text x='$padL' y='$($h-8)' fill='#8b949e' font-size='10'>$($tMin.ToString('yyyy-MM-dd HH:mm:ss'))</text>")
     [void]$sb.Append("<text x='$($padL+$plotW)' y='$($h-8)' fill='#8b949e' font-size='10' text-anchor='end'>$($tMax.ToString('yyyy-MM-dd HH:mm:ss'))</text>")
 
-    # latency polyline (only over ok points)
-    $poly = New-Object System.Collections.Generic.List[string]
+    # latency polyline (only over ok points). Break the line whenever the run
+    # id changes (a new session) so separate sessions aren't joined by a
+    # misleading diagonal across the idle gap. Each contiguous same-run stretch
+    # becomes its own polyline; dots still mark every point.
+    $allDots = New-Object System.Collections.Generic.List[string]
+    $seg = New-Object System.Collections.Generic.List[string]
+    $segRun = $null
+    $flushSeg = {
+        if ($seg.Count -ge 2) {
+            [void]$sb.Append("<polyline fill='none' stroke='#58a6ff' stroke-width='1.5' points='$($seg -join ' ')'/>")
+        }
+        $seg.Clear()
+    }
     foreach ($p in $points) {
         if ($p.ok -and $null -ne $p.lat) {
             $x = [math]::Round((& $xOf $p.t), 1)
             $y = [math]::Round((& $yOf $p.lat), 1)
-            $poly.Add("$x,$y")
+            if ($null -ne $segRun -and $p.run -ne $segRun) { & $flushSeg }
+            $segRun = $p.run
+            $seg.Add("$x,$y")
+            $allDots.Add("$x,$y")
         }
     }
-    if ($poly.Count -ge 2) {
-        [void]$sb.Append("<polyline fill='none' stroke='#58a6ff' stroke-width='1.5' points='$($poly -join ' ')'/>")
-    }
-    foreach ($pt in $poly) {
+    & $flushSeg
+    foreach ($pt in $allDots) {
         $xy = $pt -split ','
         [void]$sb.Append("<circle cx='$($xy[0])' cy='$($xy[1])' r='1.6' fill='#58a6ff'/>")
     }
@@ -481,6 +494,25 @@ function Get-PingOutages {
     return $outages
 }
 
+# Given records (already filtered to one target or many), return only those
+# belonging to each target's most-recent run/session. "Latest" is decided by
+# the run whose newest timestamp is greatest, so it's robust to legacy records
+# that lack a run id.
+function Select-PingLatestSession {
+    param([object[]] $records)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($tg in ($records | Group-Object target)) {
+        $byRun = $tg.Group | Group-Object {
+            if ($_.PSObject.Properties.Name -contains 'run' -and $_.run) { [string]$_.run } else { 'legacy' }
+        }
+        $latest = $byRun |
+            ForEach-Object { [pscustomobject]@{ grp = $_; last = ($_.Group | ForEach-Object { ConvertTo-PingTime $_.ts } | Measure-Object -Maximum).Maximum } } |
+            Sort-Object last | Select-Object -Last 1
+        if ($latest) { foreach ($r in $latest.grp.Group) { $out.Add($r) } }
+    }
+    return $out
+}
+
 # ----------------------------------------------------------------------------
 #  New-PingReportFile  —  build the HTML report silently and return its path
 #  (or $null when there's nothing to report). No console output, no browser.
@@ -489,8 +521,9 @@ function Get-PingOutages {
 function New-PingReportFile {
     [CmdletBinding()]
     param(
-        [string] $Target,          # filter to one host
-        [int]    $Last = 0         # 0 = all records
+        [string] $Target,            # filter to one host
+        [int]    $Last = 0,          # 0 = all records
+        [switch] $AllHistory         # include every session (default: latest session only)
     )
 
     $paths = Get-PingPlusPaths
@@ -505,10 +538,15 @@ function New-PingReportFile {
         Where-Object { $_ }
 
     if ($Target) { $records = $records | Where-Object { $_.target -eq $Target } }
+    # By default show only each host's most-recent session, so re-pinging the
+    # same target doesn't visually merge separate runs. -AllHistory opts into
+    # the full cross-session view (useful for "how often does it drop overall").
+    if (-not $AllHistory) { $records = Select-PingLatestSession $records }
     if ($Last -gt 0) { $records = $records | Select-Object -Last $Last }
     if (-not $records) { return $null }
 
     $generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $scopeLabel = if ($AllHistory) { 'all sessions' } else { 'latest session' }
     $groups = $records | Group-Object target
 
     $css = @'
@@ -534,7 +572,7 @@ function New-PingReportFile {
 
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.Append("<!doctype html><html><head><meta charset='utf-8'><title>ping+ report</title>$css</head><body>")
-    [void]$sb.Append("<h1>ping+ report</h1><div class='muted'>Generated $generated &middot; source: $(ConvertTo-HtmlText $paths.LogFile)</div>")
+    [void]$sb.Append("<h1>ping+ report</h1><div class='muted'>Generated $generated &middot; scope: $scopeLabel &middot; source: $(ConvertTo-HtmlText $paths.LogFile)</div>")
 
     foreach ($g in $groups) {
         $recs  = $g.Group
@@ -554,6 +592,7 @@ function New-PingReportFile {
         $outages = @(Get-PingOutages $recs)
         $tFirst  = ConvertTo-PingTime ($recs | Sort-Object { ConvertTo-PingTime $_.ts } | Select-Object -First 1).ts
         $tLast   = ConvertTo-PingTime ($recs | Sort-Object { ConvertTo-PingTime $_.ts } | Select-Object -Last 1).ts
+        $elapsed = if ($tFirst -and $tLast) { Format-PingSpan ($tLast - $tFirst) } else { '-' }
 
         $rateCls = if ($rate -eq 0) { 'good' } else { 'bad' }
 
@@ -561,6 +600,7 @@ function New-PingReportFile {
         [void]$sb.Append("<div class='muted'>$($tFirst.ToString('yyyy-MM-dd HH:mm:ss')) &rarr; $($tLast.ToString('yyyy-MM-dd HH:mm:ss'))</div>")
         [void]$sb.Append("<div class='cards'>")
         [void]$sb.Append("<div class='card'><div class='v'>$total</div><div class='k'>Pings</div></div>")
+        [void]$sb.Append("<div class='card'><div class='v'>$elapsed</div><div class='k'>Elapsed</div></div>")
         [void]$sb.Append("<div class='card good'><div class='v'>$okN</div><div class='k'>OK</div></div>")
         [void]$sb.Append("<div class='card bad'><div class='v'>$drops</div><div class='k'>Dropped</div></div>")
         [void]$sb.Append("<div class='card $rateCls'><div class='v'>$rate%</div><div class='k'>Loss</div></div>")
@@ -611,9 +651,10 @@ function Show-PingReport {
     param(
         [string] $Target,          # filter to one host
         [int]    $Last = 0,        # 0 = all records
+        [switch] $AllHistory,      # include all sessions (default: latest only)
         [switch] $NoOpen           # don't auto-open the browser
     )
-    $outFile = New-PingReportFile -Target $Target -Last $Last
+    $outFile = New-PingReportFile -Target $Target -Last $Last -AllHistory:$AllHistory
     if (-not $outFile) {
         Write-Warning "No matching ping data yet. Run some pings first (e.g. 'ping google.com')."
         return
