@@ -1,5 +1,5 @@
 # ============================================================================
-#  ping+  (PingPlus.psm1)
+#  ping+  (PingPlus.psm1)   v1.0.0   —   https://github.com/Feenixu/ping-plus
 #  A non-destructive wrapper around Windows' built-in ping.exe that:
 #    * passes every argument straight through to the real ping
 #    * streams ping's output live to your console (so it feels normal)
@@ -59,6 +59,12 @@ $script:PingPlusConfigTemplate = @'
 
     # When to run cleanup automatically: 'start', 'finish', or 'both'.
     ApplyOn = 'finish'
+
+    # How many timestamped report snapshots to keep in the reports\ folder.
+    # 'report.html' (the latest) is always kept; this bounds the dated copies
+    # like report-20260531-231841.html so that folder can't grow forever.
+    # 0 = keep none (only the latest). Set higher if you want report history.
+    KeepReports = 10
 }
 '@
 
@@ -68,6 +74,7 @@ function Get-PingPlusConfigDefaults {
         KeepRuns      = 50
         KeepDays      = 30
         ApplyOn       = 'finish'
+        KeepReports   = 10
     }
 }
 
@@ -96,6 +103,7 @@ function Get-PingPlusConfig {
     $cfg.ApplyOn = if ($apply -in 'start', 'finish', 'both') { $apply } else { 'finish' }
     $cfg.KeepRuns = [math]::Max(0, [int]$cfg.KeepRuns)
     $cfg.KeepDays = [math]::Max(0.0, [double]$cfg.KeepDays)
+    $cfg.KeepReports = [math]::Max(0, [int]$cfg.KeepReports)
     [pscustomobject]$cfg
 }
 
@@ -635,9 +643,22 @@ function New-PingReportFile {
 
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
     $outFile = Join-Path $paths.ReportDir 'report.html'
-    $sb.ToString() | Set-Content -Path $outFile -Encoding utf8
-    # also keep a timestamped copy for history
-    $sb.ToString() | Set-Content -Path (Join-Path $paths.ReportDir "report-$stamp.html") -Encoding utf8
+    $html = $sb.ToString()
+    $html | Set-Content -Path $outFile -Encoding utf8
+
+    # Keep a bounded number of timestamped snapshots for history, then prune the
+    # oldest so reports\ can't grow without limit. KeepReports comes from config.
+    $keepReports = 10
+    try { $keepReports = [int](Get-PingPlusConfig).KeepReports } catch { }
+    if ($keepReports -gt 0) {
+        $html | Set-Content -Path (Join-Path $paths.ReportDir "report-$stamp.html") -Encoding utf8
+    }
+    $snaps = @(Get-ChildItem -Path $paths.ReportDir -Filter 'report-*.html' -ErrorAction SilentlyContinue |
+        Sort-Object Name)
+    if ($snaps.Count -gt $keepReports) {
+        $snaps | Select-Object -First ($snaps.Count - $keepReports) |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 
     return $outFile
 }
@@ -668,12 +689,14 @@ function Show-PingReport {
 # ----------------------------------------------------------------------------
 function Get-PingStats {
     [CmdletBinding()]
-    param([string] $Target, [int] $Last = 0)
+    param([string] $Target, [int] $Last = 0, [switch] $AllHistory)
     $paths = Get-PingPlusPaths
     if (-not (Test-Path $paths.LogFile)) { Write-Warning 'No log yet.'; return }
     $records = Get-Content $paths.LogFile -Encoding utf8 | Where-Object { $_.Trim() } |
         ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } | Where-Object { $_ }
     if ($Target) { $records = $records | Where-Object { $_.target -eq $Target } }
+    # Match the report: default to each host's latest session unless -AllHistory.
+    if (-not $AllHistory) { $records = Select-PingLatestSession $records }
     if ($Last -gt 0) { $records = $records | Select-Object -Last $Last }
     $records | Group-Object target | ForEach-Object {
         $t = $_.Group; $tot = $t.Count

@@ -10,27 +10,45 @@ Nothing replaces `C:\Windows\System32\PING.EXE`. ping+ is a thin PowerShell
 wrapper that calls the real binary by absolute path. Removing ping+ leaves your
 system exactly as it was.
 
+- **No dependencies** — pure PowerShell + inline SVG. No internet, no JS
+  libraries, no modules to install. Works on Windows PowerShell 5.1 and 7+.
+- **Non-destructive** — never touches the real ping; install is just a profile
+  edit, fully reversible.
+
 ---
 
 ## Install
 
+### One-liner (easiest)
+
 ```powershell
-# From an elevated-or-normal PowerShell prompt:
-pwsh -File C:\ping+\Install.ps1
-# then open a new terminal, or:
-. $PROFILE
+irm https://raw.githubusercontent.com/Feenixu/ping-plus/master/get.ps1 | iex
 ```
 
-This adds a small, clearly-tagged block to your PowerShell profile that:
+This downloads ping+ to `%LOCALAPPDATA%\ping-plus` and wires it into your
+PowerShell profile. Then open a new terminal (or run `. $PROFILE`).
+
+### Or clone it yourself (anywhere)
+
+```powershell
+git clone https://github.com/Feenixu/ping-plus.git
+pwsh -File .\ping-plus\Install.ps1   # or: powershell -File ...
+. $PROFILE                            # then reload, or open a new terminal
+```
+
+Either way, `Install.ps1` adds a small, clearly-tagged block to your PowerShell
+profile that:
 
 - imports the module,
 - defines a `ping` function that **shadows** the built-in ping in interactive
   PowerShell only (functions win over `.exe`), and
-- adds the aliases `pingplus`, `ping+`, `pingreport`, `pingstats`.
+- adds the aliases `pingplus`, `ping+`, `pingreport`, `pingstats`, `pingconfig`,
+  `pingclean`.
 
 Don't want to shadow `ping`? Install with `-NoShadow` and just use `pingplus`.
 
-To remove everything: `pwsh -File C:\ping+\Install.ps1 -Uninstall`.
+To remove everything: `pwsh -File <install-dir>\Install.ps1 -Uninstall`
+(the profile block is tagged, so uninstall is clean).
 
 > ⚠️ If `pwsh` (PowerShell 7) isn't installed, use `powershell` instead — the
 > tool works on Windows PowerShell 5.1 too. If you get an execution-policy
@@ -101,8 +119,8 @@ pingstats -Target google.com -Last 1000
 ## Configuration & log retention
 
 So the log can't grow forever, ping+ prunes old data automatically based on a
-small, self-documented config file at **`C:\ping+\config.psd1`**. It's created
-on first use; open it any time with:
+small, self-documented config file named **`config.psd1`** in the install
+folder. It's created on first use; open it any time with:
 
 ```powershell
 pingconfig          # opens config.psd1 in $EDITOR / VS Code / Notepad
@@ -116,6 +134,7 @@ Default contents:
     KeepRuns      = 50       # keep only the last N ping runs
     KeepDays      = 30       # delete records older than N days
     ApplyOn       = 'finish' # 'start' | 'finish' | 'both'
+    KeepReports   = 10       # how many timestamped HTML report snapshots to keep
 }
 ```
 
@@ -125,6 +144,7 @@ Default contents:
 | `KeepRuns` | Keep only the last **N runs**. One "run" = one `ping …` command you ran. `0` = no run limit. |
 | `KeepDays` | Delete records older than **N days**. `0` = no age limit. |
 | `ApplyOn` | When cleanup runs automatically: when a ping `start`s, when it `finish`es, or `both`. |
+| `KeepReports` | How many dated report snapshots (`report-*.html`) to keep. The latest `report.html` is always kept. `0` = keep only the latest. |
 
 **RetentionMode values**
 
@@ -151,14 +171,21 @@ which is what makes "keep last N runs" possible.
 ## Where things live
 
 ```
-C:\ping+\
+<install-dir>\
   PingPlus.psm1            the wrapper + report engine
+  PingPlus.psd1            module manifest (version/metadata)
   Install.ps1              profile wiring (install / -NoShadow / -Uninstall)
-  config.psd1              retention settings (edit with `pingconfig`)
+  get.ps1                  one-line web installer
+  config.psd1              retention settings (edit with `pingconfig`; not tracked)
   README.md                this file
+  LICENSE                  MIT
+  CHANGELOG.md             version history
   logs\ping-log.jsonl      append-only history (one JSON object per event)
-  reports\report.html      latest report (+ timestamped copies)
+  reports\report.html      latest report (+ bounded timestamped snapshots)
 ```
+
+(`<install-dir>` is wherever you cloned it, or `%LOCALAPPDATA%\ping-plus` if you
+used the one-liner.)
 
 ### The log format (JSONL)
 
