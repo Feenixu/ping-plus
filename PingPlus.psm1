@@ -29,6 +29,71 @@ function Get-PingPlusPaths {
 }
 
 # ----------------------------------------------------------------------------
+#  Concurrency-safe log I/O.  Add-Content / Get-Content take exclusive-ish
+#  handles, so back-to-back ping runs (or an end-of-run report read racing a
+#  still-writing run) collide with "Stream was not readable" / "being used by
+#  another process". These helpers open with FileShare.ReadWrite and retry
+#  briefly, so readers and writers never lock each other out.
+# ----------------------------------------------------------------------------
+$script:PingUtf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+function Add-PingLogLine {
+    param([string] $Path, [string] $Line)
+    $err = $null
+    for ($try = 0; $try -lt 25; $try++) {
+        try {
+            $fs = [System.IO.FileStream]::new($Path,
+                [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::ReadWrite)
+            try {
+                $sw = [System.IO.StreamWriter]::new($fs, $script:PingUtf8NoBom)
+                $sw.WriteLine($Line)
+                $sw.Flush(); $sw.Dispose()
+            } finally { $fs.Dispose() }
+            return
+        }
+        catch { $err = $_; Start-Sleep -Milliseconds 20 }
+    }
+    # Last resort: don't let a logging hiccup ever break the ping itself.
+    Write-Verbose "ping+ log append gave up after retries: $($err.Exception.Message)"
+}
+
+function Read-PingLogLines {
+    param([string] $Path)
+    if (-not (Test-Path $Path)) { return @() }
+    for ($try = 0; $try -lt 25; $try++) {
+        try {
+            $fs = [System.IO.FileStream]::new($Path,
+                [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite)
+            try {
+                $sr = [System.IO.StreamReader]::new($fs, $script:PingUtf8NoBom)
+                $text = $sr.ReadToEnd(); $sr.Dispose()
+            } finally { $fs.Dispose() }
+            return $text -split "`r?`n" | Where-Object { $_.Trim() }
+        }
+        catch { Start-Sleep -Milliseconds 20 }
+    }
+    Write-Verbose 'ping+ log read gave up after retries.'
+    return @()
+}
+
+function Write-PingLogLines {
+    param([string] $Path, [string[]] $Lines)
+    # Atomic rewrite: write a temp file then move over the original, so a reader
+    # never sees a half-written log. Used by retention.
+    $tmp = "$Path.tmp"
+    $sw = [System.IO.StreamWriter]::new($tmp, $false, $script:PingUtf8NoBom)
+    try { foreach ($l in $Lines) { $sw.WriteLine($l) } } finally { $sw.Dispose() }
+    for ($try = 0; $try -lt 25; $try++) {
+        try { [System.IO.File]::Replace($tmp, $Path, $null); return }
+        catch {
+            try { Move-Item -Path $tmp -Destination $Path -Force; return } catch { Start-Sleep -Milliseconds 20 }
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
 #  Configuration + log retention
 # ----------------------------------------------------------------------------
 
@@ -129,7 +194,7 @@ function Invoke-PingRetention {
     if (-not $Config) { $Config = Get-PingPlusConfig }
     if ($Config.RetentionMode -eq 'none') { return }
 
-    $lines = Get-Content -Path $logFile -Encoding utf8 | Where-Object { $_.Trim() }
+    $lines = Read-PingLogLines -Path $logFile
     if (-not $lines) { return }
 
     # Parse just what retention needs: the raw line, its run id, its timestamp.
@@ -177,9 +242,7 @@ function Invoke-PingRetention {
 
     # Only rewrite if something actually changed; do it atomically.
     if ($kept.Count -ne $items.Count) {
-        $tmp = "$logFile.tmp"
-        Set-Content -Path $tmp -Value $kept -Encoding utf8
-        Move-Item -Path $tmp -Destination $logFile -Force
+        Write-PingLogLines -Path $logFile -Lines $kept
         Write-Verbose "ping+ retention: kept $($kept.Count) of $($items.Count) records."
     }
 }
@@ -280,7 +343,7 @@ function Invoke-PingPlus {
                 ts = $ts; run = $runId; target = $state.target; ip = $state.ip
                 status = $status; latency_ms = $lat; sub_ms = $subms; raw = $line.Trim()
             }
-            ($rec | ConvertTo-Json -Compress) | Add-Content -Path $logFile -Encoding utf8
+            Add-PingLogLine -Path $logFile -Line ($rec | ConvertTo-Json -Compress)
             $logged.Add($status)
         }
     }
@@ -540,8 +603,7 @@ function New-PingReportFile {
         New-Item -ItemType Directory -Path $paths.ReportDir -Force | Out-Null
     }
 
-    $records = Get-Content -Path $paths.LogFile -Encoding utf8 |
-        Where-Object { $_.Trim() } |
+    $records = Read-PingLogLines -Path $paths.LogFile |
         ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } |
         Where-Object { $_ }
 
@@ -692,7 +754,7 @@ function Get-PingStats {
     param([string] $Target, [int] $Last = 0, [switch] $AllHistory)
     $paths = Get-PingPlusPaths
     if (-not (Test-Path $paths.LogFile)) { Write-Warning 'No log yet.'; return }
-    $records = Get-Content $paths.LogFile -Encoding utf8 | Where-Object { $_.Trim() } |
+    $records = Read-PingLogLines -Path $paths.LogFile |
         ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } | Where-Object { $_ }
     if ($Target) { $records = $records | Where-Object { $_.target -eq $Target } }
     # Match the report: default to each host's latest session unless -AllHistory.
