@@ -37,19 +37,52 @@ function Get-PingPlusPaths {
 # ----------------------------------------------------------------------------
 $script:PingUtf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
+# A cross-process named mutex keyed to the log path. FileMode.Append's
+# seek-then-write is NOT atomic across processes, so two simultaneous `ping -t`
+# runs (separate processes) could grab the same end-offset and clobber each
+# other's lines. Holding this mutex around every WRITE serializes them so no
+# line is ever lost. Reads don't need it (FileShare.ReadWrite lets them proceed
+# concurrently, and the writer's flush is atomic enough for line-oriented reads).
+function Get-PingLogMutex {
+    param([string] $Path)
+    # Mutex names can't contain '\', and 'Global\' makes it machine-wide (works
+    # across sessions/users). Hash the full path so different logs don't collide.
+    $key = ($Path.ToLowerInvariant() -replace '[\\/:]', '_')
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    $hash = [BitConverter]::ToString($md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))).Replace('-', '')
+    $md5.Dispose()
+    return [System.Threading.Mutex]::new($false, "Global\pingplus_$hash")
+}
+
+function Invoke-WithPingLogLock {
+    param([string] $Path, [scriptblock] $Action)
+    $mutex = $null; $held = $false
+    try {
+        $mutex = Get-PingLogMutex -Path $Path
+        try { $held = $mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $held = $true }
+        & $Action
+    }
+    finally {
+        if ($held -and $mutex) { try { $mutex.ReleaseMutex() } catch { } }
+        if ($mutex) { $mutex.Dispose() }
+    }
+}
+
 function Add-PingLogLine {
     param([string] $Path, [string] $Line)
     $err = $null
     for ($try = 0; $try -lt 25; $try++) {
         try {
-            $fs = [System.IO.FileStream]::new($Path,
-                [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
-                [System.IO.FileShare]::ReadWrite)
-            try {
-                $sw = [System.IO.StreamWriter]::new($fs, $script:PingUtf8NoBom)
-                $sw.WriteLine($Line)
-                $sw.Flush(); $sw.Dispose()
-            } finally { $fs.Dispose() }
+            Invoke-WithPingLogLock -Path $Path -Action {
+                $fs = [System.IO.FileStream]::new($Path,
+                    [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
+                    [System.IO.FileShare]::ReadWrite)
+                try {
+                    $sw = [System.IO.StreamWriter]::new($fs, $script:PingUtf8NoBom)
+                    $sw.WriteLine($Line)
+                    $sw.Flush(); $sw.Dispose()
+                } finally { $fs.Dispose() }
+            }
             return
         }
         catch { $err = $_; Start-Sleep -Milliseconds 20 }
@@ -80,15 +113,18 @@ function Read-PingLogLines {
 
 function Write-PingLogLines {
     param([string] $Path, [string[]] $Lines)
-    # Atomic rewrite: write a temp file then move over the original, so a reader
-    # never sees a half-written log. Used by retention.
-    $tmp = "$Path.tmp"
-    $sw = [System.IO.StreamWriter]::new($tmp, $false, $script:PingUtf8NoBom)
-    try { foreach ($l in $Lines) { $sw.WriteLine($l) } } finally { $sw.Dispose() }
-    for ($try = 0; $try -lt 25; $try++) {
-        try { [System.IO.File]::Replace($tmp, $Path, $null); return }
-        catch {
-            try { Move-Item -Path $tmp -Destination $Path -Force; return } catch { Start-Sleep -Milliseconds 20 }
+    # Atomic rewrite under the write lock so retention can't clobber (or be
+    # clobbered by) a concurrent append from another ping run. Write a temp file
+    # then move it over the original, so a reader never sees a half-written log.
+    Invoke-WithPingLogLock -Path $Path -Action {
+        $tmp = "$Path.tmp"
+        $sw = [System.IO.StreamWriter]::new($tmp, $false, $script:PingUtf8NoBom)
+        try { foreach ($l in $Lines) { $sw.WriteLine($l) } } finally { $sw.Dispose() }
+        for ($try = 0; $try -lt 25; $try++) {
+            try { [System.IO.File]::Replace($tmp, $Path, $null); return }
+            catch {
+                try { Move-Item -Path $tmp -Destination $Path -Force; return } catch { Start-Sleep -Milliseconds 20 }
+            }
         }
     }
 }
