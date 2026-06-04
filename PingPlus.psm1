@@ -37,34 +37,76 @@ function Get-PingPlusPaths {
 # ----------------------------------------------------------------------------
 $script:PingUtf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
+# Cache of one named-mutex per log path (with a reentrancy depth), so we don't
+# reallocate a kernel handle on every logged line. Keyed by lower-cased path.
+$script:PingLogMutexes = @{}
+
+# Deterministic, FIPS-safe path hash (FNV-1a, 32-bit). Used only to derive a
+# legal/stable mutex name from the log path. Crypto hashes (MD5/SHA) are avoided
+# because [Security.Cryptography.MD5]::Create() throws under Windows FIPS policy,
+# which would take down all logging; this needs no cryptographic strength.
+function Get-PingPathHash {
+    param([string] $Text)
+    # FNV-1a 32-bit. Mask to 32 bits after each step so the widest product is
+    # 4294967295 * 16777619 (~7.2e16), which fits in UInt64 without overflow.
+    # NOTE: the mask MUST be the decimal literal 4294967295 — in PowerShell the
+    # hex literal 0xFFFFFFFF parses as Int32 -1, which would not mask at all and
+    # let $hash overflow on the next multiply.
+    $mask = [uint64]4294967295
+    $hash = [uint64]2166136261
+    foreach ($b in [System.Text.Encoding]::UTF8.GetBytes($Text)) {
+        $hash = ($hash -bxor [uint64]$b) -band $mask
+        $hash = ($hash * [uint64]16777619) -band $mask
+    }
+    return ('{0:x8}' -f [uint32]$hash)
+}
+
 # A cross-process named mutex keyed to the log path. FileMode.Append's
 # seek-then-write is NOT atomic across processes, so two simultaneous `ping -t`
 # runs (separate processes) could grab the same end-offset and clobber each
 # other's lines. Holding this mutex around every WRITE serializes them so no
-# line is ever lost. Reads don't need it (FileShare.ReadWrite lets them proceed
-# concurrently, and the writer's flush is atomic enough for line-oriented reads).
+# line is ever lost.
 function Get-PingLogMutex {
     param([string] $Path)
-    # Mutex names can't contain '\', and 'Global\' makes it machine-wide (works
-    # across sessions/users). Hash the full path so different logs don't collide.
-    $key = ($Path.ToLowerInvariant() -replace '[\\/:]', '_')
-    $md5 = [System.Security.Cryptography.MD5]::Create()
-    $hash = [BitConverter]::ToString($md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))).Replace('-', '')
-    $md5.Dispose()
-    return [System.Threading.Mutex]::new($false, "Global\pingplus_$hash")
+    # 'Local\' (per-session) is enough: the real case is two ping runs by the
+    # same user in the same session. 'Global\' would require SeCreateGlobalPrivilege
+    # and throw for non-admin/constrained tokens, breaking logging entirely.
+    $hash = Get-PingPathHash ($Path.ToLowerInvariant())
+    return [System.Threading.Mutex]::new($false, "Local\pingplus_$hash")
 }
 
+# Run $Action while holding the per-path write lock. Reentrant on the same
+# thread (depth-counted) so a holder can call other locked helpers without
+# self-deadlock — e.g. retention holds the lock across read+rewrite, and the
+# rewrite calls Write-PingLogLines which also locks. THROWS on acquisition
+# timeout so callers retry rather than silently writing unlocked.
 function Invoke-WithPingLogLock {
     param([string] $Path, [scriptblock] $Action)
-    $mutex = $null; $held = $false
-    try {
-        $mutex = Get-PingLogMutex -Path $Path
-        try { $held = $mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $held = $true }
-        & $Action
+    $key = $Path.ToLowerInvariant()
+    $entry = $script:PingLogMutexes[$key]
+    if (-not $entry) {
+        $entry = [pscustomobject]@{ Mutex = (Get-PingLogMutex -Path $Path); Depth = 0 }
+        $script:PingLogMutexes[$key] = $entry
     }
+    $acquiredHere = $false
+    if ($entry.Depth -eq 0) {
+        $ok = $false
+        try { $ok = $entry.Mutex.WaitOne(5000) }
+        catch [System.Threading.AbandonedMutexException] {
+            # A prior holder crashed mid-write; we now own the lock. The log may
+            # have a torn final line, but readers tolerate that (bad JSON is
+            # skipped). Surface it for diagnostics.
+            Write-Verbose 'ping+: previous log writer abandoned the lock (process likely crashed).'
+            $ok = $true
+        }
+        if (-not $ok) { throw [System.TimeoutException]::new("ping+: timed out acquiring log lock for $Path") }
+        $acquiredHere = $true
+    }
+    $entry.Depth++
+    try { & $Action }
     finally {
-        if ($held -and $mutex) { try { $mutex.ReleaseMutex() } catch { } }
-        if ($mutex) { $mutex.Dispose() }
+        $entry.Depth--
+        if ($acquiredHere) { try { $entry.Mutex.ReleaseMutex() } catch { } }
     }
 }
 
@@ -118,13 +160,22 @@ function Write-PingLogLines {
     # then move it over the original, so a reader never sees a half-written log.
     Invoke-WithPingLogLock -Path $Path -Action {
         $tmp = "$Path.tmp"
-        $sw = [System.IO.StreamWriter]::new($tmp, $false, $script:PingUtf8NoBom)
-        try { foreach ($l in $Lines) { $sw.WriteLine($l) } } finally { $sw.Dispose() }
-        for ($try = 0; $try -lt 25; $try++) {
-            try { [System.IO.File]::Replace($tmp, $Path, $null); return }
-            catch {
-                try { Move-Item -Path $tmp -Destination $Path -Force; return } catch { Start-Sleep -Milliseconds 20 }
+        $done = $false
+        try {
+            $sw = [System.IO.StreamWriter]::new($tmp, $false, $script:PingUtf8NoBom)
+            try { foreach ($l in $Lines) { $sw.WriteLine($l) } } finally { $sw.Dispose() }
+            for ($try = 0; $try -lt 25; $try++) {
+                try { [System.IO.File]::Replace($tmp, $Path, $null); $done = $true; break }
+                catch {
+                    try { Move-Item -Path $tmp -Destination $Path -Force; $done = $true; break }
+                    catch { Start-Sleep -Milliseconds 20 }
+                }
             }
+            if (-not $done) { Write-Warning "ping+: could not rewrite log $Path after retries; left unchanged." }
+        }
+        finally {
+            # Never leave an orphaned temp copy of the log behind.
+            if (-not $done -and (Test-Path $tmp)) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
         }
     }
 }
@@ -229,6 +280,23 @@ function Invoke-PingRetention {
     if (-not (Test-Path $logFile)) { return }
     if (-not $Config) { $Config = Get-PingPlusConfig }
     if ($Config.RetentionMode -eq 'none') { return }
+
+    # Hold the write lock across the WHOLE read-modify-write. Otherwise a ping
+    # run could append a record between our read and our rewrite, and the rewrite
+    # (built from the stale snapshot) would silently drop it. The lock is
+    # reentrant, so the inner Write-PingLogLines lock is a no-op re-entry.
+    # If logging is disabled/locked-out (timeout), just skip retention quietly.
+    try {
+        Invoke-WithPingLogLock -Path $logFile -Action { Invoke-PingRetentionLocked -Config $Config -LogFile $logFile }
+    } catch [System.TimeoutException] {
+        Write-Verbose 'ping+: skipped retention (could not acquire log lock).'
+    }
+}
+
+# The actual read-modify-write, always run while holding the log lock.
+function Invoke-PingRetentionLocked {
+    param([object] $Config, [string] $LogFile)
+    $logFile = $LogFile
 
     $lines = Read-PingLogLines -Path $logFile
     if (-not $lines) { return }
