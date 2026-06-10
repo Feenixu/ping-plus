@@ -15,6 +15,11 @@
 $script:PingPlusRoot = $PSScriptRoot
 if (-not $script:PingPlusRoot) { $script:PingPlusRoot = 'C:\ping+' }
 
+# Installed version (kept in sync with PingPlus.psd1 ModuleVersion). Used by the
+# update check to compare against the version published on GitHub.
+$script:PingPlusVersion = '1.0.1'
+$script:PingPlusRepoRaw  = 'https://raw.githubusercontent.com/Feenixu/ping-plus/master/PingPlus.psd1'
+
 function Get-PingPlusPaths {
     $root    = $script:PingPlusRoot
     $logDir  = Join-Path $root 'logs'
@@ -25,6 +30,7 @@ function Get-PingPlusPaths {
         ReportDir = $repDir
         LogFile    = Join-Path $logDir 'ping-log.jsonl'
         ConfigFile = Join-Path $root 'config.psd1'
+        UpdateCacheFile = Join-Path $logDir '.update-check.json'
     }
 }
 
@@ -539,6 +545,9 @@ function Invoke-PingPlus {
             $reportPath = New-PingReportFile -Target $state.target
             if ($reportPath) { Write-PingReportLink -Path $reportPath }
         }
+        # Quiet, cached (<=24h), fail-silent "update available" line. Reads the
+        # cache in the common path; only hits the network on the daily refresh.
+        Write-PingUpdateNotice
     }
 }
 
@@ -917,5 +926,114 @@ function Get-PingStats {
     }
 }
 
+# ----------------------------------------------------------------------------
+#  Update check (no hosting required - reads the version published in the repo)
+#
+#  Polls the ModuleVersion in PingPlus.psd1 on GitHub at most once per 24h,
+#  caches the result, and is entirely FAIL-SILENT: offline, a private-repo 404,
+#  GitHub down, or any error -> no output, no error, no nag. While the repo is
+#  private the raw URL 404s and this simply does nothing; it lights up on its
+#  own once the repo is public. The network call runs only inside the daily
+#  cache refresh and never blocks ping output.
+# ----------------------------------------------------------------------------
+
+# Compare two dotted versions. Returns 1 if $A > $B, -1 if <, 0 if equal.
+function Compare-PingVersion {
+    param([string] $A, [string] $B)
+    $pa = @(($A -split '\.') | ForEach-Object { [int]($_ -replace '\D','0') })
+    $pb = @(($B -split '\.') | ForEach-Object { [int]($_ -replace '\D','0') })
+    $n = [Math]::Max($pa.Count, $pb.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+        $x = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }
+        $y = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
+        if ($x -gt $y) { return 1 }
+        if ($x -lt $y) { return -1 }
+    }
+    return 0
+}
+
+# Read the cached update-check result, if any. Returns $null if absent/unreadable.
+function Get-PingUpdateCache {
+    $f = (Get-PingPlusPaths).UpdateCacheFile
+    if (-not (Test-Path $f)) { return $null }
+    try { return (Read-PingLogLines -Path $f) -join "`n" | ConvertFrom-Json } catch { return $null }
+}
+
+# Fetch the published version from GitHub. Fail-silent: returns $null on any error.
+function Get-PingPublishedVersion {
+    try {
+        $prev = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+        try {
+            $resp = Invoke-WebRequest -Uri $script:PingPlusRepoRaw -UseBasicParsing -TimeoutSec 5
+        } finally { $ProgressPreference = $prev }
+        if ($resp.Content -match "ModuleVersion\s*=\s*'([0-9][0-9.]*)'") { return $Matches[1] }
+    } catch { }
+    return $null
+}
+
+# Run (or refresh, per cache age) the update check.
+#   -Force   ignore the 24h cache and check now
+#   returns a result object { current, latest, updateAvailable, checkedUtc } or $null
+function Test-PingPlusUpdate {
+    [CmdletBinding()]
+    param([switch] $Force, [int] $MaxAgeHours = 24)
+
+    $cache = Get-PingUpdateCache
+    if (-not $Force -and $cache -and $cache.checkedUtc) {
+        try {
+            $age = (Get-Date).ToUniversalTime() - ([datetime]$cache.checkedUtc).ToUniversalTime()
+            if ($age.TotalHours -lt $MaxAgeHours) { return $cache }   # fresh enough; no network
+        } catch { }
+    }
+
+    $latest = Get-PingPublishedVersion
+    if (-not $latest) { return $cache }   # offline / private / error -> keep old cache, stay silent
+
+    $result = [ordered]@{
+        current         = $script:PingPlusVersion
+        latest          = $latest
+        updateAvailable = ((Compare-PingVersion $latest $script:PingPlusVersion) -gt 0)
+        checkedUtc      = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    try {
+        $paths = Get-PingPlusPaths
+        if (-not (Test-Path $paths.LogDir)) { New-Item -ItemType Directory -Path $paths.LogDir -Force | Out-Null }
+        Write-PingLogLines -Path $paths.UpdateCacheFile -Lines @(($result | ConvertTo-Json -Compress))
+    } catch { }
+    return [pscustomobject]$result
+}
+
+# Print a single quiet line IF an update is available (used after a ping run).
+# Reads only the cache unless it's stale; never blocks on the network in the
+# common path. Fail-silent.
+function Write-PingUpdateNotice {
+    try {
+        $r = Test-PingPlusUpdate
+        if ($r -and $r.updateAvailable) {
+            Write-Host "ping+ $($r.latest) available (you have $($r.current)) - run: pingupdate" -ForegroundColor DarkYellow
+        }
+    } catch { }
+}
+
+# Public command: force a check now and report, with how to update.
+function Get-PingPlusUpdate {
+    [CmdletBinding()]
+    param()
+    $r = Test-PingPlusUpdate -Force
+    if (-not $r -or -not $r.latest) {
+        Write-Host "ping+ $($script:PingPlusVersion) - couldn't reach GitHub to check for updates." -ForegroundColor DarkGray
+        Write-Host "(If the repo is private, the public version check can't see it.)" -ForegroundColor DarkGray
+        return
+    }
+    if ($r.updateAvailable) {
+        Write-Host "Update available: ping+ $($r.latest) (you have $($r.current))." -ForegroundColor Yellow
+        Write-Host "Update with:" -ForegroundColor Cyan
+        Write-Host "  irm https://raw.githubusercontent.com/Feenixu/ping-plus/master/get.ps1 | iex" -ForegroundColor Cyan
+        Write-Host "  (or, if you cloned it: git -C <install-dir> pull)" -ForegroundColor DarkGray
+    } else {
+        Write-Host "ping+ $($r.current) is up to date." -ForegroundColor Green
+    }
+}
+
 Export-ModuleMember -Function Invoke-PingPlus, Show-PingReport, Get-PingStats, Get-PingPlusPaths,
-    Get-PingPlusConfig, Edit-PingPlusConfig, Invoke-PingRetention
+    Get-PingPlusConfig, Edit-PingPlusConfig, Invoke-PingRetention, Get-PingPlusUpdate, Test-PingPlusUpdate

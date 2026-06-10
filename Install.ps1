@@ -68,6 +68,7 @@ Set-Alias -Name pingreport -Value Show-PingReport     -Scope Global
 Set-Alias -Name pingstats  -Value Get-PingStats       -Scope Global
 Set-Alias -Name pingconfig -Value Edit-PingPlusConfig -Scope Global
 Set-Alias -Name pingclean  -Value Invoke-PingRetention -Scope Global
+Set-Alias -Name pingupdate -Value Get-PingPlusUpdate   -Scope Global
 $shadowLine
 $endTag
 "@
@@ -87,6 +88,7 @@ Write-Host "  pingreport           build + open the HTML report"
 Write-Host "  pingstats            quick loss/latency table in the terminal"
 Write-Host "  pingconfig           open the config file (retention settings)"
 Write-Host "  pingclean            apply log retention now"
+Write-Host "  pingupdate           check GitHub for a newer version"
 Write-Host ""
 
 # Materialize the config file now so it's ready to edit immediately.

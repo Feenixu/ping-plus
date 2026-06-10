@@ -128,6 +128,20 @@ pingstats
 pingstats -Target google.com -Last 1000
 ```
 
+### Updates
+
+ping+ checks GitHub for a newer version at most once a day, in the background,
+and prints a single quiet line after a ping run if one is available. The check
+is fail-silent — offline or any error just skips it, nothing blocks your ping.
+To check on demand:
+
+```powershell
+pingupdate          # check now and show how to update
+```
+
+Updating is just re-running the installer (`irm …/get.ps1 | iex`) or, for a
+clone, `git -C <install-dir> pull`.
+
 ---
 
 ## Configuration & log retention
