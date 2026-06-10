@@ -1,5 +1,5 @@
 # ============================================================================
-#  ping+  (PingPlus.psm1)   v1.0.0   —   https://github.com/Feenixu/ping-plus
+#  ping+  (PingPlus.psm1)   v1.0.1   —   https://github.com/Feenixu/ping-plus
 #  A non-destructive wrapper around Windows' built-in ping.exe that:
 #    * passes every argument straight through to the real ping
 #    * streams ping's output live to your console (so it feels normal)
