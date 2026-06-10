@@ -56,10 +56,16 @@ Either way, `Install.ps1` adds a small, clearly-tagged block to your PowerShell
 profile that:
 
 - imports the module,
+- imports the module (via its manifest, so `Get-Module PingPlus` shows the
+  version),
 - defines a `ping` function that **shadows** the built-in ping in interactive
   PowerShell only (functions win over `.exe`), and
 - adds the aliases `pingplus`, `ping+`, `pingreport`, `pingstats`, `pingconfig`,
-  `pingclean`.
+  `pingclean`, `pingupdate`.
+
+The profile block is **guarded** — if your profile is synced across machines
+(e.g. via OneDrive) to one where ping+ isn't installed, it stays inactive and
+prints a one-line install hint instead of erroring on every new shell.
 
 Don't want to shadow `ping`? Install with `-NoShadow` and just use `pingplus`.
 

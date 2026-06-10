@@ -1,5 +1,5 @@
 # ============================================================================
-#  ping+  (PingPlus.psm1)   v1.1.0   —   https://github.com/Feenixu/ping-plus
+#  ping+  (PingPlus.psm1)   v1.1.1   —   https://github.com/Feenixu/ping-plus
 #  A non-destructive wrapper around Windows' built-in ping.exe that:
 #    * passes every argument straight through to the real ping
 #    * streams ping's output live to your console (so it feels normal)
@@ -17,7 +17,7 @@ if (-not $script:PingPlusRoot) { $script:PingPlusRoot = 'C:\ping+' }
 
 # Installed version (kept in sync with PingPlus.psd1 ModuleVersion). Used by the
 # update check to compare against the version published on GitHub.
-$script:PingPlusVersion = '1.1.0'
+$script:PingPlusVersion = '1.1.1'
 $script:PingPlusRepoRaw  = 'https://raw.githubusercontent.com/Feenixu/ping-plus/master/PingPlus.psd1'
 
 function Get-PingPlusPaths {

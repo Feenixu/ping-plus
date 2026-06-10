@@ -3,6 +3,21 @@
 All notable changes to ping+ are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-06-11
+
+Install/profile robustness. Fully backward compatible.
+
+### Fixed
+- **Synced-profile error wall** — the profile block is now guarded with
+  `Test-Path`. If your PowerShell profile is synced across machines (e.g. via
+  OneDrive) to one where ping+ isn't installed, new shells no longer throw a red
+  "module not loaded" error every time; ping+ just stays inactive and prints a
+  one-line install hint.
+- **`Get-Module` showed version `0.0`** — the installer now imports the module
+  via its manifest (`PingPlus.psd1`) instead of the bare `.psm1`, so
+  `Get-Module PingPlus` reports the real version. `FunctionsToExport` also now
+  includes `Get-PingPlusUpdate` / `Test-PingPlusUpdate`.
+
 ## [1.1.0] - 2026-06-11
 
 Adds a lightweight, no-hosting update check. Fully backward compatible.

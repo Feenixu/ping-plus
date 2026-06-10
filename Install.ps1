@@ -25,11 +25,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $moduleDir  = $PSScriptRoot
-$modulePath = Join-Path $moduleDir 'PingPlus.psm1'
+# Import the MANIFEST (.psd1), not the bare .psm1, so Get-Module reports the real
+# version and PowerShell module tooling works. Falls back to the .psm1 only if a
+# manifest somehow isn't present.
+$manifestPath = Join-Path $moduleDir 'PingPlus.psd1'
+$psm1Path     = Join-Path $moduleDir 'PingPlus.psm1'
+$modulePath   = if (Test-Path $manifestPath) { $manifestPath } else { $psm1Path }
 $startTag   = '# >>> ping+ >>>'
 $endTag     = '# <<< ping+ <<<'
 
-if (-not (Test-Path $modulePath)) {
+if (-not (Test-Path $psm1Path)) {
     throw "Cannot find PingPlus.psm1 next to Install.ps1 (looked in $moduleDir)."
 }
 
@@ -59,17 +64,26 @@ $shadowLine = if ($NoShadow) {
     "function ping { Invoke-PingPlus @args }"
 }
 
+# The block is guarded by Test-Path: this profile may be SYNCED (e.g. via
+# OneDrive) to a machine where ping+ was never installed, in which case the
+# module file won't exist there. Without the guard, every new shell on that
+# machine throws a red "module not found" error. With it, ping+ just stays
+# inactive and prints one quiet hint, leaving the rest of the profile working.
 $block = @"
 $startTag
-Import-Module '$modulePath' -Force
-Set-Alias -Name pingplus  -Value Invoke-PingPlus -Scope Global
-Set-Alias -Name 'ping+'   -Value Invoke-PingPlus -Scope Global
-Set-Alias -Name pingreport -Value Show-PingReport     -Scope Global
-Set-Alias -Name pingstats  -Value Get-PingStats       -Scope Global
-Set-Alias -Name pingconfig -Value Edit-PingPlusConfig -Scope Global
-Set-Alias -Name pingclean  -Value Invoke-PingRetention -Scope Global
-Set-Alias -Name pingupdate -Value Get-PingPlusUpdate   -Scope Global
-$shadowLine
+if (Test-Path '$modulePath') {
+    Import-Module '$modulePath' -Force
+    Set-Alias -Name pingplus  -Value Invoke-PingPlus -Scope Global
+    Set-Alias -Name 'ping+'   -Value Invoke-PingPlus -Scope Global
+    Set-Alias -Name pingreport -Value Show-PingReport     -Scope Global
+    Set-Alias -Name pingstats  -Value Get-PingStats       -Scope Global
+    Set-Alias -Name pingconfig -Value Edit-PingPlusConfig -Scope Global
+    Set-Alias -Name pingclean  -Value Invoke-PingRetention -Scope Global
+    Set-Alias -Name pingupdate -Value Get-PingPlusUpdate   -Scope Global
+    $shadowLine
+} else {
+    Write-Host "ping+ is configured in this profile but not installed on this machine. Install: irm https://raw.githubusercontent.com/Feenixu/ping-plus/master/get.ps1 | iex" -ForegroundColor DarkGray
+}
 $endTag
 "@
 
