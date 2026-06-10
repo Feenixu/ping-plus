@@ -375,11 +375,13 @@ function Write-PingReportLink {
 #  `ping+` / `pingplus` aliases (see PingPlus.psm1 export + Install.ps1).
 # ----------------------------------------------------------------------------
 function Invoke-PingPlus {
-    [CmdletBinding()]
-    param(
-        [Parameter(ValueFromRemainingArguments = $true)]
-        [string[]] $PingArgs
-    )
+    # Deliberately a SIMPLE function using the automatic $args — NOT an advanced
+    # function. Declaring [CmdletBinding()] OR any [Parameter()] attribute makes
+    # PowerShell add common parameters (-WarningAction, -Verbose, ...), and then
+    # a real ping flag like `-w 200` fails to bind with "parameter -w is
+    # ambiguous (-WarningAction/-WarningVariable)" before it ever reaches the
+    # passthrough. $args captures every token verbatim so all ping flags work.
+    $PingArgs = [string[]]$args
 
     $paths = Get-PingPlusPaths
     if (-not (Test-Path $paths.LogDir)) {
