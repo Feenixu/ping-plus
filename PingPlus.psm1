@@ -451,7 +451,38 @@ function Invoke-PingPlus {
             $logged.Add($status)
         }
     }
-    $drain = { param($rdr) if ($rdr) { while ($null -ne ($l = $rdr.ReadLine())) { & $processLine $l } } }
+    # Per-stream buffer of bytes read but not yet terminated by a newline.
+    # ReadLine() can't be used for live tailing: when the reader catches up to
+    # ping mid-line (bytes written, newline not flushed yet) ReadLine returns the
+    # PARTIAL line, so the rest arrives as a separate "line" -> the on-screen line
+    # break bug. Instead we read raw chars and only emit COMPLETE (\n-terminated)
+    # lines, holding any trailing fragment until its newline arrives.
+    $pending = @{ out = ''; err = '' }
+    $readBuf = [char[]]::new(8192)
+    $pump = {
+        param($rdr, $key)
+        if (-not $rdr) { return }
+        while (($n = $rdr.Read($readBuf, 0, $readBuf.Length)) -gt 0) {
+            $pending[$key] += [string]::new($readBuf, 0, $n)
+        }
+        $nl = $pending[$key].IndexOf("`n")
+        while ($nl -ge 0) {
+            $line = $pending[$key].Substring(0, $nl).TrimEnd("`r")
+            $pending[$key] = $pending[$key].Substring($nl + 1)
+            & $processLine $line
+            $nl = $pending[$key].IndexOf("`n")
+        }
+    }
+    # After the process has exited, emit any final fragment that has no trailing
+    # newline (rare for ping, whose output ends with one, but never drop it).
+    $flushTail = {
+        foreach ($key in 'out', 'err') {
+            if ($pending[$key].Length -gt 0) {
+                & $processLine ($pending[$key].TrimEnd("`r"))
+                $pending[$key] = ''
+            }
+        }
+    }
 
     # Run the REAL ping with stdout/stderr redirected to temp files, tail them
     # live for verbatim display, and drain the remainder in `finally`. This is
@@ -472,12 +503,15 @@ function Invoke-PingPlus {
                     $tmpErr, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite))
 
         while (-not $proc.HasExited) {
-            $line = $rOut.ReadLine()
-            if ($null -ne $line) { & $processLine $line }
-            else { Start-Sleep -Milliseconds 40 }
+            & $pump $rOut 'out'
+            & $pump $rErr 'err'
+            Start-Sleep -Milliseconds 40
         }
-        & $drain $rOut
-        & $drain $rErr
+        # Process exited: pump whatever it wrote last, then flush any final
+        # newline-less fragment so nothing is dropped.
+        & $pump $rOut 'out'
+        & $pump $rErr 'err'
+        & $flushTail
     }
     finally {
         # On Ctrl+C, ping is still flushing its statistics block — wait briefly,
@@ -485,8 +519,9 @@ function Invoke-PingPlus {
         # exactly like stock ping.
         try {
             if ($proc) { [void]$proc.WaitForExit(2000) }
-            & $drain $rOut
-            & $drain $rErr
+            & $pump $rOut 'out'
+            & $pump $rErr 'err'
+            & $flushTail
             if ($rOut) { $rOut.Dispose() }
             if ($rErr) { $rErr.Dispose() }
         } catch { }
