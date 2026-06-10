@@ -3,16 +3,20 @@
 All notable changes to ping+ are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.0.1] - 2026-06-11
+## [1.1.0] - 2026-06-11
 
-Hardens concurrent logging, fixes two display/usage bugs found after the first
-release, and adds a lightweight update check. Fully backward compatible.
+Adds a lightweight, no-hosting update check. Fully backward compatible.
 
 ### Added
 - **Update check** — `pingupdate` checks GitHub for a newer version, and a ping
   run prints one quiet line if an update is available. Cached to at most once
   per 24h and fully fail-silent (offline/error → does nothing). Requires no
   hosting; reads the version published in the repo.
+
+## [1.0.1] - 2026-06-11
+
+Hardens concurrent logging and fixes two display/usage bugs found after the
+first release. Fully backward compatible.
 
 ### Fixed
 - **Concurrent-log crash** — back-to-back runs (or a report/retention read
