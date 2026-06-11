@@ -11,8 +11,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   string, and `iex` then fails to recognize the opening `<#` comment,
   producing parse errors that point inside the header comment. `get.ps1` is
   now pure ASCII with **no BOM** — the only encoding that works both from
-  disk on PS 5.1 *and* through `iex`. It is the only file consumed via `iex`;
-  the other scripts run from disk and keep their BOMs from 1.1.2.
+  disk on PS 5.1 *and* through `iex`.
+
+### Changed
+- **All PowerShell sources are now pure ASCII with no BOMs** (em dashes in
+  comments → hyphens), superseding the 1.1.2 per-file BOM workaround entirely:
+  pure ASCII parses identically under every decode path (PS 5.1 ANSI, pwsh
+  UTF-8, `iex` strings). The requirement is documented in `CLAUDE.md` and
+  enforced by an ASCII guard in `Test-PingPlus.ps1`.
 
 ## [1.1.2] - 2026-06-11
 

@@ -1,5 +1,5 @@
-﻿<#
-  Test-PingPlus.ps1 — offline smoke test.
+<#
+  Test-PingPlus.ps1 - offline smoke test.
 
   Seeds a temporary log with synthetic pings (including a fake outage window),
   imports the module, builds a report from that temp log, and verifies the
@@ -9,6 +9,21 @@
 #>
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
+
+# Guard: every PowerShell source must be pure ASCII with no BOM (see CLAUDE.md).
+# A BOM reaches iex as a literal U+FEFF and breaks the irm|iex install; without
+# a BOM, PS 5.1 decodes files as ANSI and any non-ASCII char inside a string
+# can mangle into a smart quote that terminates the string early.
+foreach ($srcFile in Get-ChildItem -LiteralPath $here -File | Where-Object { $_.Extension -in '.ps1','.psd1','.psm1' }) {
+    $srcBytes = [System.IO.File]::ReadAllBytes($srcFile.FullName)
+    $nonAscii = 0
+    foreach ($b in $srcBytes) { if ($b -gt 127) { $nonAscii++ } }
+    if ($nonAscii -gt 0) {
+        throw "$($srcFile.Name) contains $nonAscii non-ASCII byte(s); PowerShell sources must be pure ASCII (see CLAUDE.md)."
+    }
+}
+Write-Host "ASCII check passed for all PowerShell sources."
+
 Import-Module (Join-Path $here 'PingPlus.psd1') -Force
 
 # Build a synthetic log in a temp sandbox by pointing the module's root there.

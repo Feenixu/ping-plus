@@ -1,5 +1,5 @@
-﻿<#
-  Install.ps1  —  wire ping+ into your PowerShell session.
+<#
+  Install.ps1  -  wire ping+ into your PowerShell session.
 
   What it does (all reversible, nothing destructive):
     * Adds a block to your PowerShell profile that imports the PingPlus module
@@ -71,12 +71,12 @@ $shadowLine = if ($NoShadow) {
 # baked path are doubled so they can't break the generated single-quoted
 # literal. At profile time the block:
 #   * resolves the module path: the path baked at install time, falling back to
-#     this machine's default get.ps1 install dir — so a profile synced (e.g.
+#     this machine's default get.ps1 install dir - so a profile synced (e.g.
 #     via OneDrive) from a machine that installed elsewhere still finds a
 #     local install;
 #   * imports inside try/catch, so a half-synced or corrupt install prints one
 #     quiet line instead of a red error on every shell;
-#   * if ping+ isn't on this machine at all, prints one install hint — and only
+#   * if ping+ isn't on this machine at all, prints one install hint - and only
 #     in interactive non-redirected sessions, so automation keeps clean stdout.
 # Aliases are NOT set here: the module exports them (see AliasesToExport), so
 # they update with the module instead of being frozen into the profile.

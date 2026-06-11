@@ -1,4 +1,4 @@
-﻿@{
+@{
     RootModule        = 'PingPlus.psm1'
     ModuleVersion     = '1.1.3'
     GUID              = 'b8f6c2e4-7a3d-4c1b-9e5a-2f0d6c8a1b3e'

@@ -1,5 +1,5 @@
-﻿# ============================================================================
-#  ping+  (PingPlus.psm1)   v1.1.3   —   https://github.com/Feenixu/ping-plus
+# ============================================================================
+#  ping+  (PingPlus.psm1)   v1.1.3   -   https://github.com/Feenixu/ping-plus
 #  A non-destructive wrapper around Windows' built-in ping.exe that:
 #    * passes every argument straight through to the real ping
 #    * streams ping's output live to your console (so it feels normal)
@@ -15,7 +15,7 @@
 $script:PingPlusRoot = $PSScriptRoot
 if (-not $script:PingPlusRoot) { $script:PingPlusRoot = 'C:\ping+' }
 
-# Installed version — read from PingPlus.psd1 (single source of truth) so it
+# Installed version - read from PingPlus.psd1 (single source of truth) so it
 # can't drift from what Get-Module reports. The literal below is only a
 # fallback for vendored installs that lack the manifest. Used by the update
 # check to compare against the version published on GitHub.
@@ -60,7 +60,7 @@ function Get-PingPathHash {
     param([string] $Text)
     # FNV-1a 32-bit. Mask to 32 bits after each step so the widest product is
     # 4294967295 * 16777619 (~7.2e16), which fits in UInt64 without overflow.
-    # NOTE: the mask MUST be the decimal literal 4294967295 — in PowerShell the
+    # NOTE: the mask MUST be the decimal literal 4294967295 - in PowerShell the
     # hex literal 0xFFFFFFFF parses as Int32 -1, which would not mask at all and
     # let $hash overflow on the next multiply.
     $mask = [uint64]4294967295
@@ -88,7 +88,7 @@ function Get-PingLogMutex {
 
 # Run $Action while holding the per-path write lock. Reentrant on the same
 # thread (depth-counted) so a holder can call other locked helpers without
-# self-deadlock — e.g. retention holds the lock across read+rewrite, and the
+# self-deadlock - e.g. retention holds the lock across read+rewrite, and the
 # rewrite calls Write-PingLogLines which also locks. THROWS on acquisition
 # timeout so callers retry rather than silently writing unlocked.
 function Invoke-WithPingLogLock {
@@ -200,7 +200,7 @@ function Write-PingLogLines {
 $script:PingPlusConfigTemplate = @'
 @{
     # =====================================================================
-    #  ping+ configuration   —  edit, save, then use `ping` as normal.
+    #  ping+ configuration   -  edit, save, then use `ping` as normal.
     #  (Open quickly with:  pingconfig )
     # =====================================================================
 
@@ -363,7 +363,7 @@ function Invoke-PingRetentionLocked {
 }
 
 # ----------------------------------------------------------------------------
-#  Write-PingReportLink  —  print ONE clickable line pointing at the report.
+#  Write-PingReportLink  -  print ONE clickable line pointing at the report.
 #  Uses an OSC 8 terminal hyperlink on terminals that support it (Windows
 #  Terminal, modern VS Code, ConEmu); elsewhere it prints the bare file:// URL,
 #  which those terminals still make Ctrl+click-able. Never any escape noise.
@@ -382,11 +382,11 @@ function Write-PingReportLink {
 }
 
 # ----------------------------------------------------------------------------
-#  Invoke-PingPlus  —  the wrapper. Call it directly, or via the `ping` /
+#  Invoke-PingPlus  -  the wrapper. Call it directly, or via the `ping` /
 #  `ping+` / `pingplus` aliases (see PingPlus.psm1 export + Install.ps1).
 # ----------------------------------------------------------------------------
 function Invoke-PingPlus {
-    # Deliberately a SIMPLE function using the automatic $args — NOT an advanced
+    # Deliberately a SIMPLE function using the automatic $args - NOT an advanced
     # function. Declaring [CmdletBinding()] OR any [Parameter()] attribute makes
     # PowerShell add common parameters (-WarningAction, -Verbose, ...), and then
     # a real ping flag like `-w 200` fails to bind with "parameter -w is
@@ -527,7 +527,7 @@ function Invoke-PingPlus {
         & $flushTail
     }
     finally {
-        # On Ctrl+C, ping is still flushing its statistics block — wait briefly,
+        # On Ctrl+C, ping is still flushing its statistics block - wait briefly,
         # then drain every remaining line so the final summary shows and logs
         # exactly like stock ping.
         try {
@@ -740,7 +740,7 @@ function Select-PingLatestSession {
 }
 
 # ----------------------------------------------------------------------------
-#  New-PingReportFile  —  build the HTML report silently and return its path
+#  New-PingReportFile  -  build the HTML report silently and return its path
 #  (or $null when there's nothing to report). No console output, no browser.
 #  This is what the live `ping` wrapper calls to refresh the report.
 # ----------------------------------------------------------------------------
@@ -881,7 +881,7 @@ function New-PingReportFile {
 }
 
 # ----------------------------------------------------------------------------
-#  Show-PingReport  —  interactive command: build the report, print where it
+#  Show-PingReport  -  interactive command: build the report, print where it
 #  went, and open it in the browser (unless -NoOpen).
 # ----------------------------------------------------------------------------
 function Show-PingReport {
