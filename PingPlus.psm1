@@ -1,5 +1,5 @@
-# ============================================================================
-#  ping+  (PingPlus.psm1)   v1.1.1   —   https://github.com/Feenixu/ping-plus
+﻿# ============================================================================
+#  ping+  (PingPlus.psm1)   v1.1.2   —   https://github.com/Feenixu/ping-plus
 #  A non-destructive wrapper around Windows' built-in ping.exe that:
 #    * passes every argument straight through to the real ping
 #    * streams ping's output live to your console (so it feels normal)
@@ -15,9 +15,14 @@
 $script:PingPlusRoot = $PSScriptRoot
 if (-not $script:PingPlusRoot) { $script:PingPlusRoot = 'C:\ping+' }
 
-# Installed version (kept in sync with PingPlus.psd1 ModuleVersion). Used by the
-# update check to compare against the version published on GitHub.
-$script:PingPlusVersion = '1.1.1'
+# Installed version — read from PingPlus.psd1 (single source of truth) so it
+# can't drift from what Get-Module reports. The literal below is only a
+# fallback for vendored installs that lack the manifest. Used by the update
+# check to compare against the version published on GitHub.
+$script:PingPlusVersion = '1.1.2'
+try {
+    $script:PingPlusVersion = [string](Import-PowerShellDataFile (Join-Path $script:PingPlusRoot 'PingPlus.psd1')).ModuleVersion
+} catch { }
 $script:PingPlusRepoRaw  = 'https://raw.githubusercontent.com/Feenixu/ping-plus/master/PingPlus.psd1'
 
 function Get-PingPlusPaths {
@@ -1029,11 +1034,27 @@ function Get-PingPlusUpdate {
         Write-Host "Update available: ping+ $($r.latest) (you have $($r.current))." -ForegroundColor Yellow
         Write-Host "Update with:" -ForegroundColor Cyan
         Write-Host "  irm https://raw.githubusercontent.com/Feenixu/ping-plus/master/get.ps1 | iex" -ForegroundColor Cyan
-        Write-Host "  (or, if you cloned it: git -C <install-dir> pull)" -ForegroundColor DarkGray
+        Write-Host "  (or, if you cloned it: git -C <install-dir> pull, then re-run Install.ps1 to refresh the profile block)" -ForegroundColor DarkGray
     } else {
         Write-Host "ping+ $($r.current) is up to date." -ForegroundColor Green
     }
 }
 
-Export-ModuleMember -Function Invoke-PingPlus, Show-PingReport, Get-PingStats, Get-PingPlusPaths,
-    Get-PingPlusConfig, Edit-PingPlusConfig, Invoke-PingRetention, Get-PingPlusUpdate, Test-PingPlusUpdate
+# Aliases live in the module (and in the manifest's AliasesToExport) rather
+# than in the installer-generated profile block, so module updates deliver new
+# commands without users having to re-run Install.ps1.
+Set-Alias -Name pingplus   -Value Invoke-PingPlus
+Set-Alias -Name 'ping+'    -Value Invoke-PingPlus
+Set-Alias -Name pingreport -Value Show-PingReport
+Set-Alias -Name pingstats  -Value Get-PingStats
+Set-Alias -Name pingconfig -Value Edit-PingPlusConfig
+Set-Alias -Name pingclean  -Value Invoke-PingRetention
+Set-Alias -Name pingupdate -Value Get-PingPlusUpdate
+
+Export-ModuleMember -Function @(
+    'Invoke-PingPlus', 'Show-PingReport', 'Get-PingStats', 'Get-PingPlusPaths',
+    'Get-PingPlusConfig', 'Edit-PingPlusConfig', 'Invoke-PingRetention',
+    'Get-PingPlusUpdate', 'Test-PingPlusUpdate'
+) -Alias @(
+    'pingplus', 'ping+', 'pingreport', 'pingstats', 'pingconfig', 'pingclean', 'pingupdate'
+)

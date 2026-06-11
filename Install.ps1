@@ -1,9 +1,9 @@
-<#
+﻿<#
   Install.ps1  —  wire ping+ into your PowerShell session.
 
   What it does (all reversible, nothing destructive):
-    * Adds a block to your PowerShell profile that imports PingPlus.psm1
-      and defines convenient commands.
+    * Adds a block to your PowerShell profile that imports the PingPlus module
+      (via its manifest, PingPlus.psd1) and defines convenient commands.
     * By default it also defines a `ping` FUNCTION that shadows the built-in
       ping for interactive sessions ONLY. PowerShell resolves functions before
       external .exe files, so `ping google.com` runs the enhanced version while
@@ -15,7 +15,7 @@
     pwsh -File C:\ping+\Install.ps1 -NoShadow  # installs, does NOT shadow `ping`
     pwsh -File C:\ping+\Install.ps1 -Uninstall # removes the ping+ block
 
-  After installing, open a NEW terminal (or run: . $PROFILE).
+  After installing, open a NEW terminal (or run: . $PROFILE.CurrentUserAllHosts).
 #>
 [CmdletBinding()]
 param(
@@ -25,17 +25,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $moduleDir  = $PSScriptRoot
-# Import the MANIFEST (.psd1), not the bare .psm1, so Get-Module reports the real
-# version and PowerShell module tooling works. Falls back to the .psm1 only if a
-# manifest somehow isn't present.
+# The profile block imports the MANIFEST (.psd1), not the bare .psm1, so
+# Get-Module reports the real version and PowerShell module tooling works.
 $manifestPath = Join-Path $moduleDir 'PingPlus.psd1'
 $psm1Path     = Join-Path $moduleDir 'PingPlus.psm1'
-$modulePath   = if (Test-Path $manifestPath) { $manifestPath } else { $psm1Path }
+$modulePath   = $manifestPath
 $startTag   = '# >>> ping+ >>>'
 $endTag     = '# <<< ping+ <<<'
 
-if (-not (Test-Path $psm1Path)) {
-    throw "Cannot find PingPlus.psm1 next to Install.ps1 (looked in $moduleDir)."
+# Both files are required (-LiteralPath so dirs containing [brackets] work).
+foreach ($required in @($manifestPath, $psm1Path)) {
+    if (-not (Test-Path -LiteralPath $required)) {
+        throw "Cannot find $(Split-Path $required -Leaf) next to Install.ps1 (looked in $moduleDir)."
+    }
 }
 
 # Ensure profile file exists.
@@ -64,28 +66,40 @@ $shadowLine = if ($NoShadow) {
     "function ping { Invoke-PingPlus @args }"
 }
 
-# The block is guarded by Test-Path: this profile may be SYNCED (e.g. via
-# OneDrive) to a machine where ping+ was never installed, in which case the
-# module file won't exist there. Without the guard, every new shell on that
-# machine throws a red "module not found" error. With it, ping+ just stays
-# inactive and prints one quiet hint, leaving the rest of the profile working.
-$block = @"
-$startTag
-if (Test-Path '$modulePath') {
-    Import-Module '$modulePath' -Force
-    Set-Alias -Name pingplus  -Value Invoke-PingPlus -Scope Global
-    Set-Alias -Name 'ping+'   -Value Invoke-PingPlus -Scope Global
-    Set-Alias -Name pingreport -Value Show-PingReport     -Scope Global
-    Set-Alias -Name pingstats  -Value Get-PingStats       -Scope Global
-    Set-Alias -Name pingconfig -Value Edit-PingPlusConfig -Scope Global
-    Set-Alias -Name pingclean  -Value Invoke-PingRetention -Scope Global
-    Set-Alias -Name pingupdate -Value Get-PingPlusUpdate   -Scope Global
-    $shadowLine
-} else {
+# The block is generated from a single-quoted template (placeholders swapped in
+# below) so nothing expands at install time by accident, and apostrophes in the
+# baked path are doubled so they can't break the generated single-quoted
+# literal. At profile time the block:
+#   * resolves the module path: the path baked at install time, falling back to
+#     this machine's default get.ps1 install dir — so a profile synced (e.g.
+#     via OneDrive) from a machine that installed elsewhere still finds a
+#     local install;
+#   * imports inside try/catch, so a half-synced or corrupt install prints one
+#     quiet line instead of a red error on every shell;
+#   * if ping+ isn't on this machine at all, prints one install hint — and only
+#     in interactive non-redirected sessions, so automation keeps clean stdout.
+# Aliases are NOT set here: the module exports them (see AliasesToExport), so
+# they update with the module instead of being frozen into the profile.
+$blockTemplate = @'
+# >>> ping+ >>>
+$pingPlusModule = '__MODULE_PATH__'
+if (-not (Test-Path -LiteralPath $pingPlusModule) -and $env:LOCALAPPDATA) {
+    $pingPlusModule = Join-Path $env:LOCALAPPDATA 'ping-plus\PingPlus.psd1'
+}
+if (Test-Path -LiteralPath $pingPlusModule) {
+    try {
+        Import-Module $pingPlusModule -Force -ErrorAction Stop
+        __SHADOW_LINE__
+    } catch {
+        Write-Host "ping+ found at $pingPlusModule but failed to load: $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
+} elseif ([Environment]::UserInteractive -and -not [Console]::IsOutputRedirected) {
     Write-Host "ping+ is configured in this profile but not installed on this machine. Install: irm https://raw.githubusercontent.com/Feenixu/ping-plus/master/get.ps1 | iex" -ForegroundColor DarkGray
 }
-$endTag
-"@
+Remove-Variable -Name pingPlusModule -ErrorAction SilentlyContinue
+# <<< ping+ <<<
+'@
+$block = $blockTemplate.Replace('__MODULE_PATH__', $modulePath.Replace("'", "''")).Replace('__SHADOW_LINE__', $shadowLine)
 
 $newContent = ($content + "`r`n`r`n" + $block).TrimStart()
 Set-Content -Path $profilePath -Value $newContent -Encoding utf8
@@ -107,10 +121,12 @@ Write-Host ""
 
 # Materialize the config file now so it's ready to edit immediately.
 try {
-    Import-Module $modulePath -Force
+    Import-Module $modulePath -Force -ErrorAction Stop
     $null = Get-PingPlusConfig
     Write-Host "Config file: $((Get-PingPlusPaths).ConfigFile)" -ForegroundColor Cyan
     Write-Host ""
-} catch { }
+} catch {
+    Write-Warning "ping+ was wired into the profile, but importing the module failed: $($_.Exception.Message)"
+}
 
-Write-Host "Load it now without reopening:  . `$PROFILE" -ForegroundColor Yellow
+Write-Host "Load it now without reopening:  . `"$profilePath`"" -ForegroundColor Yellow

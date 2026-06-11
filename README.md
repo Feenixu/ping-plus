@@ -42,30 +42,33 @@ irm https://raw.githubusercontent.com/Feenixu/ping-plus/master/get.ps1 | iex
 ```
 
 This downloads ping+ to `%LOCALAPPDATA%\ping-plus` and wires it into your
-PowerShell profile. Then open a new terminal (or run `. $PROFILE`).
+PowerShell profile. Then open a new terminal (or run
+`. $PROFILE.CurrentUserAllHosts`).
 
 ### Or clone it yourself (anywhere)
 
 ```powershell
 git clone https://github.com/Feenixu/ping-plus.git
 pwsh -File .\ping-plus\Install.ps1   # or: powershell -File ...
-. $PROFILE                            # then reload, or open a new terminal
+. $PROFILE.CurrentUserAllHosts        # then reload, or open a new terminal
 ```
 
 Either way, `Install.ps1` adds a small, clearly-tagged block to your PowerShell
 profile that:
 
-- imports the module,
 - imports the module (via its manifest, so `Get-Module PingPlus` shows the
   version),
 - defines a `ping` function that **shadows** the built-in ping in interactive
   PowerShell only (functions win over `.exe`), and
-- adds the aliases `pingplus`, `ping+`, `pingreport`, `pingstats`, `pingconfig`,
-  `pingclean`, `pingupdate`.
+- makes the aliases `pingplus`, `ping+`, `pingreport`, `pingstats`,
+  `pingconfig`, `pingclean`, `pingupdate` available (the module exports them,
+  so updates can add commands without re-running the installer).
 
 The profile block is **guarded** — if your profile is synced across machines
-(e.g. via OneDrive) to one where ping+ isn't installed, it stays inactive and
-prints a one-line install hint instead of erroring on every new shell.
+(e.g. via OneDrive), the block first looks for ping+ at the path it was
+installed from, then falls back to this machine's default install location;
+if neither exists it stays inactive and prints a one-line install hint (in
+interactive shells only) instead of erroring on every new shell.
 
 Don't want to shadow `ping`? Install with `-NoShadow` and just use `pingplus`.
 

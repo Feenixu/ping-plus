@@ -1,4 +1,4 @@
-<#
+﻿<#
   get.ps1  —  one-line web installer for ping+.
 
   Usage (in PowerShell):
@@ -57,4 +57,4 @@ if (-not (Test-Path $installer)) { throw "Install.ps1 not found in $Dir after do
 
 & $installer -NoShadow:$NoShadow
 Write-Host ""
-Write-Host "ping+ is installed. Open a new terminal (or run '. `$PROFILE') to start using it." -ForegroundColor Green
+Write-Host "ping+ is installed. Open a new terminal (or run '. `$PROFILE.CurrentUserAllHosts') to start using it." -ForegroundColor Green

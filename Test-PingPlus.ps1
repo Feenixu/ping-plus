@@ -1,4 +1,4 @@
-<#
+﻿<#
   Test-PingPlus.ps1 — offline smoke test.
 
   Seeds a temporary log with synthetic pings (including a fake outage window),
@@ -9,7 +9,7 @@
 #>
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-Import-Module (Join-Path $here 'PingPlus.psm1') -Force
+Import-Module (Join-Path $here 'PingPlus.psd1') -Force
 
 # Build a synthetic log in a temp sandbox by pointing the module's root there.
 $sandbox = Join-Path $env:TEMP ('pingplus-test-' + [guid]::NewGuid().ToString('N'))
