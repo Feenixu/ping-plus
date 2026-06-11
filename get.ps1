@@ -1,5 +1,5 @@
-﻿<#
-  get.ps1  —  one-line web installer for ping+.
+<#
+  get.ps1  -  one-line web installer for ping+.
 
   Usage (in PowerShell):
       irm https://raw.githubusercontent.com/Feenixu/ping-plus/master/get.ps1 | iex
@@ -32,7 +32,7 @@ if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Forc
 $git = Get-Command git -ErrorAction SilentlyContinue
 if ($git) {
     if (Test-Path (Join-Path $Dir '.git')) {
-        Write-Host "Existing clone found — updating (git pull)..." -ForegroundColor DarkGray
+        Write-Host "Existing clone found - updating (git pull)..." -ForegroundColor DarkGray
         & $git.Source -C $Dir pull --ff-only
     }
     else {
@@ -41,7 +41,7 @@ if ($git) {
     }
 }
 else {
-    Write-Host "git not found — downloading zip instead..." -ForegroundColor DarkGray
+    Write-Host "git not found - downloading zip instead..." -ForegroundColor DarkGray
     $tmpZip = Join-Path $env:TEMP ('pingplus-' + [guid]::NewGuid().ToString('N') + '.zip')
     Invoke-WebRequest -Uri $ZipUrl -OutFile $tmpZip
     $tmpDir = Join-Path $env:TEMP ('pingplus-' + [guid]::NewGuid().ToString('N'))

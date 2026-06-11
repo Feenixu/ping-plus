@@ -3,6 +3,17 @@
 All notable changes to ping+ are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.3] - 2026-06-11
+
+### Fixed
+- **`irm … | iex` install broke in 1.1.2** — the UTF-8 BOM added to `get.ps1`
+  arrives as a literal U+FEFF character when the file is downloaded as a
+  string, and `iex` then fails to recognize the opening `<#` comment,
+  producing parse errors that point inside the header comment. `get.ps1` is
+  now pure ASCII with **no BOM** — the only encoding that works both from
+  disk on PS 5.1 *and* through `iex`. It is the only file consumed via `iex`;
+  the other scripts run from disk and keep their BOMs from 1.1.2.
+
 ## [1.1.2] - 2026-06-11
 
 Hardening pass over the 1.1.1 install/profile work (code-review findings).

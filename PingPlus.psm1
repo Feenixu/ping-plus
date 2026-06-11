@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-#  ping+  (PingPlus.psm1)   v1.1.2   —   https://github.com/Feenixu/ping-plus
+#  ping+  (PingPlus.psm1)   v1.1.3   —   https://github.com/Feenixu/ping-plus
 #  A non-destructive wrapper around Windows' built-in ping.exe that:
 #    * passes every argument straight through to the real ping
 #    * streams ping's output live to your console (so it feels normal)
@@ -19,7 +19,7 @@ if (-not $script:PingPlusRoot) { $script:PingPlusRoot = 'C:\ping+' }
 # can't drift from what Get-Module reports. The literal below is only a
 # fallback for vendored installs that lack the manifest. Used by the update
 # check to compare against the version published on GitHub.
-$script:PingPlusVersion = '1.1.2'
+$script:PingPlusVersion = '1.1.3'
 try {
     $script:PingPlusVersion = [string](Import-PowerShellDataFile (Join-Path $script:PingPlusRoot 'PingPlus.psd1')).ModuleVersion
 } catch { }
