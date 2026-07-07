@@ -40,25 +40,38 @@ foreach ($required in @($manifestPath, $psm1Path)) {
     }
 }
 
-# Ensure profile file exists.
 $profilePath = $PROFILE.CurrentUserAllHosts
 if (-not $profilePath) { $profilePath = $PROFILE }
-$profileDir = Split-Path $profilePath -Parent
-if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
-if (-not (Test-Path $profilePath)) { New-Item -ItemType File -Path $profilePath -Force | Out-Null }
-
-# Strip any existing ping+ block so install/uninstall is idempotent.
-$content = Get-Content -Path $profilePath -Raw -ErrorAction SilentlyContinue
-if ($null -eq $content) { $content = '' }
 $pattern = [regex]::Escape($startTag) + '.*?' + [regex]::Escape($endTag)
-$content = [regex]::Replace($content, $pattern, '', 'Singleline').TrimEnd()
+# Read/write the profile via .NET with an explicit UTF-8 (BOM) encoding, NOT
+# Get-Content -Raw / Set-Content -Encoding utf8. On PS 5.1 Get-Content decodes a
+# BOM-less UTF-8 profile as ANSI, so round-tripping it here would permanently
+# mangle any non-ASCII the user already has (prompt glyphs, accented names).
+# ReadAllText honors a BOM and otherwise defaults to UTF-8; the BOM we write
+# makes PS 5.1 read the profile back as UTF-8.
+$utf8Bom = [System.Text.UTF8Encoding]::new($true)
 
 if ($Uninstall) {
-    Set-Content -Path $profilePath -Value $content -Encoding utf8
+    # Nothing to do (and don't create an empty profile) if there's no profile.
+    if (-not (Test-Path -LiteralPath $profilePath)) {
+        Write-Host "No PowerShell profile at $profilePath - nothing to remove." -ForegroundColor Green
+        return
+    }
+    $content = [System.IO.File]::ReadAllText($profilePath)
+    $content = [regex]::Replace($content, $pattern, '', 'Singleline').TrimEnd()
+    [System.IO.File]::WriteAllText($profilePath, $content, $utf8Bom)
     Write-Host "ping+ removed from $profilePath" -ForegroundColor Green
     Write-Host "Open a new terminal for it to take effect." -ForegroundColor Yellow
     return
 }
+
+# Install path: ensure the profile exists, then strip any prior ping+ block so
+# re-running is idempotent (never duplicates the block).
+$profileDir = Split-Path $profilePath -Parent
+if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
+if (-not (Test-Path $profilePath)) { New-Item -ItemType File -Path $profilePath -Force | Out-Null }
+$content = [System.IO.File]::ReadAllText($profilePath)
+$content = [regex]::Replace($content, $pattern, '', 'Singleline').TrimEnd()
 
 $shadowLine = if ($NoShadow) {
     "# (ping not shadowed; use 'pingplus' or 'ping+')"
@@ -102,7 +115,7 @@ Remove-Variable -Name pingPlusModule -ErrorAction SilentlyContinue
 $block = $blockTemplate.Replace('__MODULE_PATH__', $modulePath.Replace("'", "''")).Replace('__SHADOW_LINE__', $shadowLine)
 
 $newContent = ($content + "`r`n`r`n" + $block).TrimStart()
-Set-Content -Path $profilePath -Value $newContent -Encoding utf8
+[System.IO.File]::WriteAllText($profilePath, $newContent, $utf8Bom)
 
 Write-Host "ping+ installed into $profilePath" -ForegroundColor Green
 Write-Host ""

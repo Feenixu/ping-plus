@@ -1,5 +1,5 @@
 # ============================================================================
-#  ping+  (PingPlus.psm1)   v1.1.3   -   https://github.com/Feenixu/ping-plus
+#  ping+  (PingPlus.psm1)   v1.2.0   -   https://github.com/Feenixu/ping-plus
 #  A non-destructive wrapper around Windows' built-in ping.exe that:
 #    * passes every argument straight through to the real ping
 #    * streams ping's output live to your console (so it feels normal)
@@ -19,9 +19,9 @@ if (-not $script:PingPlusRoot) { $script:PingPlusRoot = 'C:\ping+' }
 # can't drift from what Get-Module reports. The literal below is only a
 # fallback for vendored installs that lack the manifest. Used by the update
 # check to compare against the version published on GitHub.
-$script:PingPlusVersion = '1.1.3'
+$script:PingPlusVersion = '1.2.0'
 try {
-    $script:PingPlusVersion = [string](Import-PowerShellDataFile (Join-Path $script:PingPlusRoot 'PingPlus.psd1')).ModuleVersion
+    $script:PingPlusVersion = [string](Import-PowerShellDataFile ([WildcardPattern]::Escape((Join-Path $script:PingPlusRoot 'PingPlus.psd1')))).ModuleVersion
 } catch { }
 $script:PingPlusRepoRaw  = 'https://raw.githubusercontent.com/Feenixu/ping-plus/master/PingPlus.psd1'
 
@@ -247,26 +247,35 @@ function Get-PingPlusConfig {
     param()
     $cfgFile = (Get-PingPlusPaths).ConfigFile
     if (-not (Test-Path $cfgFile)) {
-        try { Set-Content -Path $cfgFile -Value $script:PingPlusConfigTemplate -Encoding utf8 } catch { }
+        # ASCII (no BOM): PS 5.1's -Encoding utf8 writes a BOM, which then trips
+        # the repo's ASCII source guard on the next run. The template is pure ASCII.
+        try { Set-Content -Path $cfgFile -Value $script:PingPlusConfigTemplate -Encoding ascii } catch { }
     }
     $cfg = Get-PingPlusConfigDefaults
     if (Test-Path $cfgFile) {
         try {
-            $loaded = Import-PowerShellDataFile -Path $cfgFile
+            # -ErrorAction Stop: a parse failure is non-terminating on PS 5.1, so
+            # without this the catch never fires and the raw error prints instead
+            # of the friendly "using defaults" fallback. Escape [] in the path so
+            # a bracketed install dir doesn't get wildcard-interpreted.
+            $loaded = Import-PowerShellDataFile -Path ([WildcardPattern]::Escape($cfgFile)) -ErrorAction Stop
             foreach ($k in $loaded.Keys) { $cfg[$k] = $loaded[$k] }
         }
         catch {
             Write-Warning "ping+: could not parse $cfgFile ($($_.Exception.Message)). Using defaults."
         }
     }
-    # Validate / normalize so bad values can never wipe data unexpectedly.
+    # Validate / normalize so bad values can never wipe data unexpectedly. Each
+    # numeric coercion is guarded so a non-numeric value (e.g. KeepRuns = 'fifty')
+    # falls back to its default instead of erroring on every ping run.
+    $defs = Get-PingPlusConfigDefaults
     $mode = "$($cfg.RetentionMode)".ToLower()
     $cfg.RetentionMode = if ($mode -in 'runs', 'days', 'both', 'either', 'none') { $mode } else { 'both' }
     $apply = "$($cfg.ApplyOn)".ToLower()
     $cfg.ApplyOn = if ($apply -in 'start', 'finish', 'both') { $apply } else { 'finish' }
-    $cfg.KeepRuns = [math]::Max(0, [int]$cfg.KeepRuns)
-    $cfg.KeepDays = [math]::Max(0.0, [double]$cfg.KeepDays)
-    $cfg.KeepReports = [math]::Max(0, [int]$cfg.KeepReports)
+    try { $cfg.KeepRuns = [math]::Max(0, [int]$cfg.KeepRuns) }        catch { $cfg.KeepRuns = $defs.KeepRuns }
+    try { $cfg.KeepDays = [math]::Max(0.0, [double]$cfg.KeepDays) }   catch { $cfg.KeepDays = $defs.KeepDays }
+    try { $cfg.KeepReports = [math]::Max(0, [int]$cfg.KeepReports) }  catch { $cfg.KeepReports = $defs.KeepReports }
     [pscustomobject]$cfg
 }
 
@@ -285,7 +294,7 @@ function Edit-PingPlusConfig {
 # Apply the configured retention policy to the log (safe to call anytime).
 function Invoke-PingRetention {
     [CmdletBinding()]
-    param([object] $Config)
+    param([object] $Config, [string] $ActiveRun)
 
     $logFile = (Get-PingPlusPaths).LogFile
     if (-not (Test-Path $logFile)) { return }
@@ -298,7 +307,7 @@ function Invoke-PingRetention {
     # reentrant, so the inner Write-PingLogLines lock is a no-op re-entry.
     # If logging is disabled/locked-out (timeout), just skip retention quietly.
     try {
-        Invoke-WithPingLogLock -Path $logFile -Action { Invoke-PingRetentionLocked -Config $Config -LogFile $logFile }
+        Invoke-WithPingLogLock -Path $logFile -Action { Invoke-PingRetentionLocked -Config $Config -LogFile $logFile -ActiveRun $ActiveRun }
     } catch [System.TimeoutException] {
         Write-Verbose 'ping+: skipped retention (could not acquire log lock).'
     }
@@ -306,7 +315,7 @@ function Invoke-PingRetention {
 
 # The actual read-modify-write, always run while holding the log lock.
 function Invoke-PingRetentionLocked {
-    param([object] $Config, [string] $LogFile)
+    param([object] $Config, [string] $LogFile, [string] $ActiveRun)
     $logFile = $LogFile
 
     $lines = Read-PingLogLines -Path $logFile
@@ -333,6 +342,10 @@ function Invoke-PingRetentionLocked {
             Sort-Object last | Select-Object -Last ([int]$Config.KeepRuns) | ForEach-Object { $_.run }
         $keepRunSet = [System.Collections.Generic.HashSet[string]]::new()
         foreach ($r in $keepRuns) { [void]$keepRunSet.Add([string]$r) }
+        # Never delete the run that's still in progress (its records may not yet
+        # sort newest if a concurrent run just finished). Guards against a small
+        # KeepRuns truncating a live `ping -t` mid-session.
+        if ($ActiveRun) { [void]$keepRunSet.Add([string]$ActiveRun) }
     }
 
     # Age-based limit: keep records newer than the cutoff.
@@ -382,6 +395,56 @@ function Write-PingReportLink {
 }
 
 # ----------------------------------------------------------------------------
+#  ConvertFrom-PingLine  -  classify ONE raw ping output line into a log record
+#  (an [ordered] hashtable), or $null if the line isn't a loggable event.
+#  $State is a small object carrying target/ip across the lines of a run; it is
+#  updated in place (the "Pinging host [ip]" header, or a DNS-error host, set it).
+#  Split out from Invoke-PingPlus so the parser can be unit-tested directly.
+# ----------------------------------------------------------------------------
+function ConvertFrom-PingLine {
+    param(
+        [string] $Line,
+        [object] $State,
+        [string] $RunId,
+        [string] $Ts
+    )
+    if (-not $Ts) { $Ts = (Get-Date).ToString('o') }
+    $status = $null; $lat = $null; $subms = $false
+    if ($Line -match 'Pinging\s+(?<host>\S+)\s+\[(?<ip>[^\]]+)\]') {
+        $State.target = $Matches['host']; $State.ip = $Matches['ip']
+    }
+    elseif ($Line -match 'Pinging\s+(?<host>\S+)\s+with') {
+        $State.target = $Matches['host']; if (-not $State.ip) { $State.ip = $Matches['host'] }
+    }
+    elseif ($Line -match 'Request timed out')                          { $status = 'timeout' }
+    # Broadened from '(host|net)' so port/protocol/IPv6 unreachable replies are
+    # counted as loss instead of silently dropped (they carry no 'time=' field).
+    elseif ($Line -match 'Destination .*unreachable')                  { $status = 'unreachable' }
+    elseif ($Line -match 'could not find host|could not find') {
+        $status = 'dns_error'
+        # Recover the target from the error itself: a DNS-error run has no
+        # "Pinging host" header, so otherwise the record would carry the wrong
+        # target parsed from the command line.
+        if ($Line -match 'could not find host\s+(?<h>\S+)') { $State.target = $Matches['h'].TrimEnd('.') }
+    }
+    elseif ($Line -match 'General failure|transmit failed|TTL expired'){ $status = 'error' }
+    # Non-greedy source up to the ": " before the reply body. Handles IPv4
+    # ("Reply from 1.2.3.4: bytes=32 time=5ms"), IPv6 with a leading colon
+    # ("Reply from ::1: time<1ms"), and full IPv6 sources without truncation.
+    elseif ($Line -match 'Reply from (?<rip>\S+?):\s.*time(?<op>[=<])(?<t>\d+)\s*ms') {
+        $status = 'ok'
+        $lat    = [int]$Matches['t']
+        if ($Matches['op'] -eq '<') { $subms = $true }
+        if (-not $State.ip) { $State.ip = ($Matches['rip']).Trim() }
+    }
+    if (-not $status) { return $null }
+    return [ordered]@{
+        ts = $Ts; run = $RunId; target = $State.target; ip = $State.ip
+        status = $status; latency_ms = $lat; sub_ms = $subms; raw = $Line.Trim()
+    }
+}
+
+# ----------------------------------------------------------------------------
 #  Invoke-PingPlus  -  the wrapper. Call it directly, or via the `ping` /
 #  `ping+` / `pingplus` aliases (see PingPlus.psm1 export + Install.ps1).
 # ----------------------------------------------------------------------------
@@ -411,13 +474,34 @@ function Invoke-PingPlus {
         return
     }
 
-    # Best-effort target = last token that isn't a -flag / /flag. Held on an
-    # object so the parsed value is readable from the line processor and the
-    # finally block below.
-    $bestTarget = ($PingArgs | Where-Object { $_ -notmatch '^[-/]' } | Select-Object -Last 1)
+    # Best-effort target = FIRST token that isn't a -flag / /flag, skipping the
+    # value that a value-taking option consumes (e.g. the '200' in '-w 200'), so
+    # 'ping badhost -n 1' resolves 'badhost', not '1'. Reply/DNS-error lines
+    # refine this later; this only has to be right for failure-only runs that
+    # never print a "Pinging host" header. Held on an object so the line
+    # processor and the finally block can read it.
+    $valueFlags = 'nlwivrsjkSpRc'   # ping options that take a following value
+    $bestTarget = $null
+    for ($ai = 0; $ai -lt $PingArgs.Count; $ai++) {
+        $tok = $PingArgs[$ai]
+        if ($tok -match '^[-/]') {
+            if ($tok -match '^[-/](?<f>[A-Za-z])$' -and $valueFlags.Contains($Matches['f'])) { $ai++ }
+            continue
+        }
+        $bestTarget = $tok; break
+    }
     if (-not $bestTarget) { $bestTarget = 'unknown' }
     $state  = [pscustomobject]@{ target = $bestTarget; ip = $null }
     $logged = [System.Collections.Generic.List[string]]::new()
+    # Display sink. Normally lines go to the success stream (Write-Output) so
+    # `ping host > out.txt`, `ping | ...`, and `$x = ping host` capture them like
+    # stock ping. But on Ctrl+C PowerShell STOPS the pipeline, so success-stream
+    # writes in the finally-drain are discarded (and poison the rest of the
+    # finally). For that path we flip to writing straight to the console, which
+    # survives a stopped pipeline - preserving ping's final statistics block and
+    # the report link exactly as before. Held in a hashtable so the $processLine
+    # closure sees the flip. (mutable reference)
+    $disp = @{ Console = $false }
 
     # Load retention config and stamp this invocation with a sortable run id so
     # "keep last N runs" can group records. Retention failures must never break
@@ -425,7 +509,7 @@ function Invoke-PingPlus {
     $cfg   = Get-PingPlusConfig
     $runId = (Get-Date).ToString('yyyyMMddHHmmssfff') + '-' + ([guid]::NewGuid().ToString('N').Substring(0, 4))
     if ($cfg.ApplyOn -eq 'start' -or $cfg.ApplyOn -eq 'both') {
-        try { Invoke-PingRetention -Config $cfg } catch { }
+        try { Invoke-PingRetention -Config $cfg -ActiveRun $runId } catch { }
     }
 
     # Process one raw ping line: echo it *verbatim* (so the on-screen experience
@@ -437,31 +521,13 @@ function Invoke-PingPlus {
         # continuous (-t) run is interrupted. Swallow it so the terminal shows
         # only its own native "^C" indicator, matching the stock ping look.
         if ($line.Trim() -eq 'Control-C') { return }
-        Write-Host $line
-        $ts = (Get-Date).ToString('o'); $status = $null; $lat = $null; $subms = $false
-        if ($line -match 'Pinging\s+(?<host>\S+)\s+\[(?<ip>[^\]]+)\]') {
-            $state.target = $Matches['host']; $state.ip = $Matches['ip']
-        }
-        elseif ($line -match 'Pinging\s+(?<host>\S+)\s+with') {
-            $state.target = $Matches['host']; if (-not $state.ip) { $state.ip = $Matches['host'] }
-        }
-        elseif ($line -match 'Request timed out')                          { $status = 'timeout' }
-        elseif ($line -match 'Destination (host|net) unreachable')         { $status = 'unreachable' }
-        elseif ($line -match 'could not find host|could not find')         { $status = 'dns_error' }
-        elseif ($line -match 'General failure|transmit failed|TTL expired'){ $status = 'error' }
-        elseif ($line -match 'Reply from (?<rip>[^:]+):.*time(?<op>[=<])(?<t>\d+)\s*ms') {
-            $status = 'ok'
-            $lat    = [int]$Matches['t']
-            if ($Matches['op'] -eq '<') { $subms = $true }
-            if (-not $state.ip) { $state.ip = ($Matches['rip']).Trim() }
-        }
-        if ($status) {
-            $rec = [ordered]@{
-                ts = $ts; run = $runId; target = $state.target; ip = $state.ip
-                status = $status; latency_ms = $lat; sub_ms = $subms; raw = $line.Trim()
-            }
+        # Success stream normally (redirectable); direct-to-console on the Ctrl+C
+        # drain path, where the pipeline is already stopped. See $disp above.
+        if ($disp.Console) { [Console]::Out.WriteLine($line) } else { Write-Output $line }
+        $rec = ConvertFrom-PingLine -Line $line -State $state -RunId $runId
+        if ($rec) {
             Add-PingLogLine -Path $logFile -Line ($rec | ConvertTo-Json -Compress)
-            $logged.Add($status)
+            $logged.Add([string]$rec.status)
         }
     }
     # Per-stream buffer of bytes read but not yet terminated by a newline.
@@ -507,9 +573,14 @@ function Invoke-PingPlus {
     $tmpOut = [System.IO.Path]::GetTempFileName()
     $tmpErr = [System.IO.Path]::GetTempFileName()
     $proc = $null; $rOut = $null; $rErr = $null
+    $completedNormally = $false
     try {
         $proc = Start-Process -FilePath $pingExe -ArgumentList $PingArgs -NoNewWindow -PassThru `
                     -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+        # Touch .Handle now so the OS handle is cached while the process is alive;
+        # otherwise Start-Process -PassThru leaves $proc.ExitCode $null after exit
+        # and we couldn't propagate ping's real exit code.
+        try { $null = $proc.Handle } catch { }
         $rOut = [System.IO.StreamReader]::new([System.IO.FileStream]::new(
                     $tmpOut, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite))
         $rErr = [System.IO.StreamReader]::new([System.IO.FileStream]::new(
@@ -525,8 +596,13 @@ function Invoke-PingPlus {
         & $pump $rOut 'out'
         & $pump $rErr 'err'
         & $flushTail
+        $completedNormally = $true
     }
     finally {
+        # If we didn't reach the end of the try, the run was interrupted (Ctrl+C
+        # stopped the pipeline). Drain to the console instead of the (now dead)
+        # success stream so the final statistics block still shows.
+        if (-not $completedNormally) { $disp.Console = $true }
         # On Ctrl+C, ping is still flushing its statistics block - wait briefly,
         # then drain every remaining line so the final summary shows and logs
         # exactly like stock ping.
@@ -540,10 +616,14 @@ function Invoke-PingPlus {
         } catch { }
         Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
 
+        # Propagate ping's real exit code so `if (ping -n 1 host) {}` and
+        # `$LASTEXITCODE` idioms behave exactly as with stock ping.
+        try { if ($proc -and $proc.HasExited) { $global:LASTEXITCODE = $proc.ExitCode } } catch { }
+
         # Apply log retention (per config) before building the report so the
         # report reflects exactly what's kept on disk.
         if ($cfg.ApplyOn -eq 'finish' -or $cfg.ApplyOn -eq 'both') {
-            try { Invoke-PingRetention -Config $cfg } catch { }
+            try { Invoke-PingRetention -Config $cfg -ActiveRun $runId } catch { }
         }
         # The one and only addition to stock ping: a single clickable link.
         if ($logged.Count -gt 0) {
@@ -567,6 +647,14 @@ function ConvertTo-PingTime {
     } catch {
         try { return [datetime]$s } catch { return $null }
     }
+}
+
+# Format a (possibly $null) parsed timestamp for display; '-' when unparseable,
+# so one corrupt log line can't crash the whole report with a null .ToString().
+function Format-PingStamp {
+    param($t)
+    if ($t) { return $t.ToString('yyyy-MM-dd HH:mm:ss') }
+    return '-'
 }
 
 function Format-PingSpan {
@@ -685,14 +773,19 @@ function New-PingStripSvg {
     $n = $ordered.Count
     if ($n -lt 1) { return '' }
     $w = 900; $h = 26
-    $bw = [math]::Max(($w / $n), 0.5)
+    # Step by the exact fractional width so bars always span [0,$w] and the
+    # NEWEST pings are never pushed past the viewBox (the old 0.5px floor made
+    # x march off the right edge once n exceeded ~1800, hiding recent data).
+    # Only the DRAWN width is clamped to >=1px so each bar stays visible.
+    $step   = $w / $n
+    $bwDraw = [math]::Max([math]::Ceiling($step), 1)
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.Append("<svg viewBox='0 0 $w $h' class='strip' xmlns='http://www.w3.org/2000/svg'>")
     [void]$sb.Append("<rect x='0' y='0' width='$w' height='$h' fill='#0d1117'/>")
     for ($i = 0; $i -lt $n; $i++) {
-        $x = [math]::Round($i * $bw, 2)
+        $x = [math]::Round($i * $step, 2)
         $col = if ($ordered[$i].status -eq 'ok') { '#2ea043' } else { '#f85149' }
-        [void]$sb.Append("<rect x='$x' y='0' width='$([math]::Ceiling($bw))' height='$h' fill='$col'/>")
+        [void]$sb.Append("<rect x='$x' y='0' width='$bwDraw' height='$h' fill='$col'/>")
     }
     [void]$sb.Append('</svg>')
     return $sb.ToString()
@@ -704,16 +797,25 @@ function Get-PingOutages {
     $ordered = $records | Sort-Object { ConvertTo-PingTime $_.ts }
     $outages = New-Object System.Collections.Generic.List[object]
     $cur = $null
+    $curRun = $null
     foreach ($r in $ordered) {
+        $run = if ($r.PSObject.Properties.Name -contains 'run' -and $r.run) { [string]$r.run } else { 'legacy' }
         if ($r.status -ne 'ok') {
+            # Close the current outage when the session (run id) changes, so a
+            # trailing failure of one run and the opening failure of the next
+            # (hours/days later) aren't merged into one bogus multi-hour outage
+            # spanning the idle gap. This mirrors the latency graph's per-run
+            # line break.
+            if ($null -ne $cur -and $run -ne $curRun) { $outages.Add($cur); $cur = $null }
             if ($null -eq $cur) {
                 $cur = [pscustomobject]@{ start = (ConvertTo-PingTime $r.ts); end = (ConvertTo-PingTime $r.ts); count = 1; kinds = @{} }
+                $curRun = $run
             } else {
                 $cur.end = (ConvertTo-PingTime $r.ts); $cur.count++
             }
             $cur.kinds[$r.status] = ([int]$cur.kinds[$r.status]) + 1
         } else {
-            if ($null -ne $cur) { $outages.Add($cur); $cur = $null }
+            if ($null -ne $cur) { $outages.Add($cur); $cur = $null; $curRun = $null }
         }
     }
     if ($null -ne $cur) { $outages.Add($cur) }
@@ -767,7 +869,10 @@ function New-PingReportFile {
     # same target doesn't visually merge separate runs. -AllHistory opts into
     # the full cross-session view (useful for "how often does it drop overall").
     if (-not $AllHistory) { $records = Select-PingLatestSession $records }
-    if ($Last -gt 0) { $records = $records | Select-Object -Last $Last }
+    # Sort by real time before taking the last N, so "-Last N" means the N most
+    # recent records even when several hosts are interleaved in the log (session
+    # selection groups by target, which is not time order).
+    if ($Last -gt 0) { $records = @($records | Sort-Object { ConvertTo-PingTime $_.ts }) | Select-Object -Last $Last }
     if (-not $records) { return $null }
 
     $generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -822,7 +927,7 @@ function New-PingReportFile {
         $rateCls = if ($rate -eq 0) { 'good' } else { 'bad' }
 
         [void]$sb.Append("<h2>$(ConvertTo-HtmlText $g.Name)</h2>")
-        [void]$sb.Append("<div class='muted'>$($tFirst.ToString('yyyy-MM-dd HH:mm:ss')) &rarr; $($tLast.ToString('yyyy-MM-dd HH:mm:ss'))</div>")
+        [void]$sb.Append("<div class='muted'>$(Format-PingStamp $tFirst) &rarr; $(Format-PingStamp $tLast)</div>")
         [void]$sb.Append("<div class='cards'>")
         [void]$sb.Append("<div class='card'><div class='v'>$total</div><div class='k'>Pings</div></div>")
         [void]$sb.Append("<div class='card'><div class='v'>$elapsed</div><div class='k'>Elapsed</div></div>")
@@ -845,9 +950,9 @@ function New-PingReportFile {
             [void]$sb.Append("<table><tr><th>#</th><th>From</th><th>To</th><th>Duration</th><th>Failed pings</th><th>Type</th></tr>")
             $i = 1
             foreach ($o in $outages) {
-                $dur = Format-PingSpan ($o.end - $o.start)
+                $dur = if ($o.start -and $o.end) { Format-PingSpan ($o.end - $o.start) } else { '-' }
                 $kinds = ($o.kinds.GetEnumerator() | ForEach-Object { "$($_.Key) x$($_.Value)" }) -join ', '
-                [void]$sb.Append("<tr><td>$i</td><td>$($o.start.ToString('yyyy-MM-dd HH:mm:ss'))</td><td>$($o.end.ToString('yyyy-MM-dd HH:mm:ss'))</td><td>$dur</td><td>$($o.count)</td><td>$(ConvertTo-HtmlText $kinds)</td></tr>")
+                [void]$sb.Append("<tr><td>$i</td><td>$(Format-PingStamp $o.start)</td><td>$(Format-PingStamp $o.end)</td><td>$dur</td><td>$($o.count)</td><td>$(ConvertTo-HtmlText $kinds)</td></tr>")
                 $i++
             }
             [void]$sb.Append("</table>")
@@ -914,7 +1019,7 @@ function Get-PingStats {
     if ($Target) { $records = $records | Where-Object { $_.target -eq $Target } }
     # Match the report: default to each host's latest session unless -AllHistory.
     if (-not $AllHistory) { $records = Select-PingLatestSession $records }
-    if ($Last -gt 0) { $records = $records | Select-Object -Last $Last }
+    if ($Last -gt 0) { $records = @($records | Sort-Object { ConvertTo-PingTime $_.ts }) | Select-Object -Last $Last }
     $records | Group-Object target | ForEach-Object {
         $t = $_.Group; $tot = $t.Count
         $ok = @($t | Where-Object status -eq 'ok').Count

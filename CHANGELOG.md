@@ -3,6 +3,64 @@
 All notable changes to ping+ are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-07-01
+
+Correctness pass from a full project audit. Several of the README's headline
+promises were breaking silently on real input; this fixes them and adds real
+test coverage for the risky paths (parser, retention, report math, install).
+
+### Fixed
+- **`ping` output is now redirectable again** - lines were written with
+  `Write-Host`, so `ping host > out.txt`, `ping host | findstr ...`, and
+  `$x = ping host` all captured nothing. They now go through `Write-Output`
+  (the report link stays console-only), matching stock ping.
+- **IPv6 replies are logged** - `ping ::1` (and any abbreviated IPv6 source
+  with a leading colon) matched no regex, so the run logged zero records and
+  printed no report link. Full IPv6 source addresses are also no longer
+  truncated to their first hextet.
+- **`Destination port/protocol unreachable` counts as loss** - previously only
+  `host`/`net` unreachable were logged, so those failures showed 0% loss.
+- **`$LASTEXITCODE` reflects ping's real exit code** - `if (ping -n 1 host){}`
+  and exit-code checks work again (the process handle is now cached so the code
+  survives).
+- **Failure-only runs record the right target** - `ping badhost -n 1` logged
+  `target: "1"`; the target is now the first non-flag argument, and a DNS error
+  recovers the host name from ping's own message.
+- **Availability strip no longer hides the newest pings** - past ~1800 records
+  the bars marched off the right edge of the SVG; the strip now always spans the
+  full width so long `-t` runs show every ping.
+- **`-Last N` returns the N most recent records** even when several hosts are
+  interleaved in the log (it was slicing target-grouped, not time, order).
+- **`-AllHistory` outages no longer bridge idle gaps** between sessions - a
+  trailing failure of one run and the opening failure of the next are no longer
+  merged into one bogus multi-hour outage (matches the latency graph's per-run
+  line break).
+- **A corrupt log line can't crash the report** - unparseable timestamps are
+  rendered as `-` instead of throwing on a null `.ToString()`.
+- **Config: bad values always fall back to defaults** - a non-numeric
+  `KeepRuns`/`KeepDays`/`KeepReports` (e.g. `'fifty'`) no longer errors on every
+  ping run; each coercion is guarded. A malformed `config.psd1` now hits the
+  friendly "using defaults" warning instead of a raw error wall.
+- **Retention never prunes the in-progress run** - a concurrent run finishing
+  with a small `KeepRuns` could delete a live `ping -t`'s records mid-session.
+- **Installer no longer wipes history on update** - re-running the installer
+  (the documented way to update) preserved nothing; `logs\`, `reports\`, and
+  `config.psd1` are now stashed and restored around the clone/extract.
+- **`irm | iex` no longer leaks settings into your shell** - the installer body
+  runs in a child scope, so `$ErrorActionPreference='Stop'`, the forced TLS
+  setting, and its temp variables no longer persist in the caller's session.
+- **Install/uninstall won't mangle a UTF-8 profile** - the profile is read and
+  written via .NET with an explicit encoding, so existing non-ASCII (prompt
+  glyphs, accented text) survives on PS 5.1. Uninstalling with no profile no
+  longer creates an empty one.
+
+### Changed
+- Config template is written as ASCII (no BOM), so it can't trip the ASCII
+  source guard on the next run.
+- `Test-PingPlus.ps1` now runs real unit tests (line parser, config validation,
+  retention semantics, percentiles, outage grouping) plus the end-to-end smoke,
+  and excludes the runtime `config.psd1` from the source ASCII guard.
+
 ## [1.1.3] - 2026-06-11
 
 ### Fixed
