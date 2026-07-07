@@ -244,6 +244,52 @@ Check 'Stats: 52 ok'        ($stats[0].OK -eq 52)         "(got $($stats[0].OK))
 Check 'Stats: loss ~13.33%' ([math]::Abs($stats[0].'Loss%' - 13.33) -lt 0.01) "(got $($stats[0].'Loss%'))"
 
 # ---------------------------------------------------------------------------
+# Update check: 'current' and 'updateAvailable' must be computed LIVE against
+# the running module, never served from a stale cache snapshot. Regression:
+# after the user updated, the passive banner kept nagging "1.1.2 available
+# (you have 1.1.0)" because the cache had frozen current=1.1.0. These run
+# offline off a seeded cache (recent checkedUtc -> no network).
+# ---------------------------------------------------------------------------
+function Test-UpdateScenario {
+    param([string] $Running, [string] $CachedLatest)
+    & $mod {
+        param($running, $cachedLatest)
+        $saved = $script:PingPlusVersion
+        try {
+            $script:PingPlusVersion = $running
+            $f = (Get-PingPlusPaths).UpdateCacheFile
+            $store = [ordered]@{ latest = $cachedLatest; checkedUtc = (Get-Date).ToUniversalTime().ToString('o') }
+            Write-PingLogLines -Path $f -Lines @(($store | ConvertTo-Json -Compress))
+            return (Test-PingPlusUpdate)
+        } finally { $script:PingPlusVersion = $saved }
+    } $Running $CachedLatest
+}
+
+$r1 = Test-UpdateScenario -Running '1.2.0' -CachedLatest '1.1.2'
+Check 'Update: no nag when running >= cached latest' ($r1.updateAvailable -eq $false) "(got $($r1.updateAvailable))"
+Check 'Update: reports live current version'         ($r1.current -eq '1.2.0')        "(got $($r1.current))"
+
+$r2 = Test-UpdateScenario -Running '1.2.0' -CachedLatest '1.3.0'
+Check 'Update: nag when cached latest is newer'      ($r2.updateAvailable -eq $true)  "(got $($r2.updateAvailable))"
+Check 'Update: current stays live under nag'         ($r2.current -eq '1.2.0')        "(got $($r2.current))"
+
+# A pre-fix cache file (frozen current/updateAvailable snapshot) must be
+# re-evaluated live, not trusted verbatim.
+$r3 = & $mod {
+    param($running)
+    $saved = $script:PingPlusVersion
+    try {
+        $script:PingPlusVersion = $running
+        $f = (Get-PingPlusPaths).UpdateCacheFile
+        $stale = [ordered]@{ current = '1.1.0'; latest = '1.1.2'; updateAvailable = $true; checkedUtc = (Get-Date).ToUniversalTime().ToString('o') }
+        Write-PingLogLines -Path $f -Lines @(($stale | ConvertTo-Json -Compress))
+        return (Test-PingPlusUpdate)
+    } finally { $script:PingPlusVersion = $saved }
+} '1.2.0'
+Check 'Update: stale old-format snapshot ignored'      ($r3.updateAvailable -eq $false) "(got $($r3.updateAvailable))"
+Check 'Update: reports live current, not cached 1.1.0' ($r3.current -eq '1.2.0')        "(got $($r3.current))"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""

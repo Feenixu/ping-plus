@@ -3,6 +3,19 @@
 All notable changes to ping+ are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-07-07
+
+### Fixed
+- **Update banner no longer nags after you've already updated.** The passive
+  "update available" line printed after a ping cached a frozen snapshot of your
+  installed version, so after updating it kept showing e.g. "1.1.2 available
+  (you have 1.1.0)" for up to 24h (until the cache expired or you ran
+  `pingupdate`), even though `pingupdate` itself correctly reported you were up
+  to date. The cache now stores only the last-seen published version; your
+  current version and whether an update is available are recomputed live
+  against the running module every time. Added regression tests covering the
+  stale-snapshot case (including old-format cache files).
+
 ## [1.2.0] - 2026-07-01
 
 Correctness pass from a full project audit. Several of the README's headline

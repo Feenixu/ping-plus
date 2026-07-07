@@ -1,5 +1,5 @@
 # ============================================================================
-#  ping+  (PingPlus.psm1)   v1.2.0   -   https://github.com/Feenixu/ping-plus
+#  ping+  (PingPlus.psm1)   v1.2.1   -   https://github.com/Feenixu/ping-plus
 #  A non-destructive wrapper around Windows' built-in ping.exe that:
 #    * passes every argument straight through to the real ping
 #    * streams ping's output live to your console (so it feels normal)
@@ -19,7 +19,7 @@ if (-not $script:PingPlusRoot) { $script:PingPlusRoot = 'C:\ping+' }
 # can't drift from what Get-Module reports. The literal below is only a
 # fallback for vendored installs that lack the manifest. Used by the update
 # check to compare against the version published on GitHub.
-$script:PingPlusVersion = '1.2.0'
+$script:PingPlusVersion = '1.2.1'
 try {
     $script:PingPlusVersion = [string](Import-PowerShellDataFile ([WildcardPattern]::Escape((Join-Path $script:PingPlusRoot 'PingPlus.psd1')))).ModuleVersion
 } catch { }
@@ -1088,29 +1088,45 @@ function Test-PingPlusUpdate {
     [CmdletBinding()]
     param([switch] $Force, [int] $MaxAgeHours = 24)
 
+    # The cache stores ONLY the network fact (the last-seen published version and
+    # when we saw it). 'current' and 'updateAvailable' are ALWAYS recomputed live
+    # against the running module below. Caching those two would nag "update
+    # available (you have <old>)" for up to 24h AFTER the user already updated -
+    # the frozen snapshot still said current=<old> until it expired or a forced
+    # pingupdate rewrote it. Recomputing live makes the banner reflect reality.
+    $latest = $null; $checkedUtc = $null
     $cache = Get-PingUpdateCache
-    if (-not $Force -and $cache -and $cache.checkedUtc) {
+    if (-not $Force -and $cache -and $cache.checkedUtc -and $cache.latest) {
         try {
             $age = (Get-Date).ToUniversalTime() - ([datetime]$cache.checkedUtc).ToUniversalTime()
-            if ($age.TotalHours -lt $MaxAgeHours) { return $cache }   # fresh enough; no network
+            if ($age.TotalHours -lt $MaxAgeHours) { $latest = $cache.latest; $checkedUtc = $cache.checkedUtc }
         } catch { }
     }
 
-    $latest = Get-PingPublishedVersion
-    if (-not $latest) { return $cache }   # offline / private / error -> keep old cache, stay silent
+    if (-not $latest) {
+        $fetched = Get-PingPublishedVersion
+        if ($fetched) {
+            $latest = $fetched
+            $checkedUtc = (Get-Date).ToUniversalTime().ToString('o')
+            try {
+                $paths = Get-PingPlusPaths
+                if (-not (Test-Path $paths.LogDir)) { New-Item -ItemType Directory -Path $paths.LogDir -Force | Out-Null }
+                $store = [ordered]@{ latest = $latest; checkedUtc = $checkedUtc }
+                Write-PingLogLines -Path $paths.UpdateCacheFile -Lines @(($store | ConvertTo-Json -Compress))
+            } catch { }
+        } elseif ($cache -and $cache.latest) {
+            $latest = $cache.latest; $checkedUtc = $cache.checkedUtc   # offline: fall back to last known
+        }
+    }
 
-    $result = [ordered]@{
+    if (-not $latest) { return $null }   # never had a successful check -> stay silent
+
+    return [pscustomobject]([ordered]@{
         current         = $script:PingPlusVersion
         latest          = $latest
         updateAvailable = ((Compare-PingVersion $latest $script:PingPlusVersion) -gt 0)
-        checkedUtc      = (Get-Date).ToUniversalTime().ToString('o')
-    }
-    try {
-        $paths = Get-PingPlusPaths
-        if (-not (Test-Path $paths.LogDir)) { New-Item -ItemType Directory -Path $paths.LogDir -Force | Out-Null }
-        Write-PingLogLines -Path $paths.UpdateCacheFile -Lines @(($result | ConvertTo-Json -Compress))
-    } catch { }
-    return [pscustomobject]$result
+        checkedUtc      = $checkedUtc
+    })
 }
 
 # Print a single quiet line IF an update is available (used after a ping run).
